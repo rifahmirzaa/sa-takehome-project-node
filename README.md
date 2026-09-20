@@ -69,6 +69,8 @@ npm start
 ```
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+Configuration, templates, and static files resolve relative to `app.js`, so moving the repository or launching it from another working directory requires no file-path changes. Browser assets use site-relative URLs, and the payment return URL uses the current browser origin.
+
 ## Testing & Verification
 
 Run the automated test suite (using Node's built-in test runner):

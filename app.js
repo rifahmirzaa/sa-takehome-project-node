@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const exphbs = require('express-handlebars');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const { books, getBookById } = require('./lib/catalog');
 const payments = require('./lib/payments');
@@ -13,6 +13,7 @@ app.engine('hbs', exphbs({
   defaultLayout: 'main',
   extname: '.hbs'
 }));
+app.set('views', path.join(__dirname, 'views'));
 app.set('view engine', 'hbs');
 app.use(express.static(path.join(__dirname, 'public')));
 
