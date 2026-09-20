@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "description": "SA Takehome Project",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "test": "node --test"
   },
   "author": "Matt Mitchell",
   "license": "MIT",
@@ -12,6 +13,6 @@
     "express": "^4.13.3",
     "express-handlebars": "^5.2.1",
     "path": "^0.12.7",
-    "stripe": "^8.137.0"
+    "stripe": "^22.6.2"
   }
 }
