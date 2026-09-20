@@ -283,3 +283,45 @@ test('POST /webhook verifies signature and handles events safely', async () => {
     await close();
   }
 });
+
+test('GET /success security headers', async () => {
+  const { baseUrl, close } = await startServer();
+  try {
+    const res = await fetch(`${baseUrl}/success`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+    assert.match(res.headers.get('content-security-policy'), /js\.stripe\.com/);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /checkout handles unconfigured Stripe without crashing', async () => {
+  const prevSecretKey = process.env.STRIPE_SECRET_KEY;
+  const prevPubKey = process.env.STRIPE_PUBLISHABLE_KEY;
+  delete process.env.STRIPE_SECRET_KEY;
+  delete process.env.STRIPE_PUBLISHABLE_KEY;
+
+  const { baseUrl, close } = await startServer();
+  try {
+    const res = await fetch(`${baseUrl}/checkout?item=1`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Payment processing is temporarily unavailable/);
+  } finally {
+    process.env.STRIPE_SECRET_KEY = prevSecretKey;
+    process.env.STRIPE_PUBLISHABLE_KEY = prevPubKey;
+    await close();
+  }
+});
+
+test('payments helper functions validate and parse client secrets', () => {
+  assert.equal(payments.isValidClientSecret('pi_3UHO4dICrHVTMrD0_secret_abc123'), true);
+  assert.equal(payments.isValidClientSecret('seti_123_secret_abc'), false);
+  assert.equal(payments.isValidClientSecret('pi_123'), false);
+  assert.equal(payments.isValidClientSecret(null), false);
+
+  assert.equal(payments.extractPaymentIntentId('pi_3UHO4dICrHVTMrD0_secret_abc123'), 'pi_3UHO4dICrHVTMrD0');
+  assert.equal(payments.extractPaymentIntentId('invalid'), null);
+});

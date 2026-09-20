@@ -23,14 +23,46 @@
             </div>
           </div>
           <hr class="mt-40">
-          <p class="text-muted text-center mb-0">
-            Payment is not available in this demo yet.
-          </p>
+
+          {{#if stripeConfigured}}
+            <div id="checkout-data" data-book-id="{{book.id}}" data-publishable-key="{{publishableKey}}" hidden></div>
+            <div id="loading-indicator" class="text-center py-4">
+              <div class="spinner-border text-primary" role="status">
+                <span class="sr-only">Loading payment form…</span>
+              </div>
+              <p class="text-muted mt-2 mb-0">Initializing payment form…</p>
+            </div>
+
+            <form id="payment-form" class="d-none">
+              <div id="payment-element">
+                <!-- Stripe Payment Element mounts here -->
+              </div>
+              <div id="payment-message" class="alert alert-danger d-none mt-3" role="alert"></div>
+              <button id="submit-button" class="btn btn-primary btn-block mt-4 py-2" type="submit" disabled>
+                <span id="button-text">Pay {{book.formattedPrice}} {{book.currencyDisplay}}</span>
+                <span id="spinner" class="spinner-border spinner-border-sm d-none ml-2" role="status" aria-hidden="true"></span>
+              </button>
+            </form>
+            <noscript>
+              <div class="alert alert-warning mt-3 mb-0" role="alert">
+                Payment requires JavaScript to be enabled in your browser.
+              </div>
+            </noscript>
+          {{else}}
+            <div class="alert alert-warning text-center mb-0" role="alert">
+              Payment processing is temporarily unavailable because Stripe configuration is incomplete.
+            </div>
+          {{/if}}
         </div>
         <div class="card-footer bg-transparent border-top-0 pt-0 text-center pb-3">
           <a href="/" class="btn btn-outline-secondary btn-sm">Change book</a>
         </div>
       </div>
+
+      {{#if stripeConfigured}}
+        <script src="https://js.stripe.com/v3/"></script>
+        <script src="/js/checkout.js"></script>
+      {{/if}}
     {{else}}
       <div class="text-center mt-40">
         <a href="/" class="btn btn-primary">Browse books</a>
