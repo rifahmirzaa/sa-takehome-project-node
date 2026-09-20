@@ -4,6 +4,8 @@ const exphbs = require('express-handlebars');
 require('dotenv').config();
 const stripe = require('stripe');
 
+const { books, getBookById } = require('./lib/catalog');
+
 var app = express();
 
 // view engine setup (Handlebars)
@@ -13,47 +15,55 @@ app.engine('hbs', exphbs({
 }));
 app.set('view engine', 'hbs');
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.urlencoded({ extended: true }))
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json({}));
+
+function formatPrice(amount, currency) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency.toUpperCase()
+  }).format(amount / 100);
+}
+
+function toBookViewData(book) {
+  return {
+    ...book,
+    formattedPrice: formatPrice(book.amount, book.currency),
+    currencyDisplay: book.currency.toUpperCase()
+  };
+}
 
 /**
  * Home route
  */
 app.get('/', function(req, res) {
-  res.render('index');
+  res.render('index', {
+    books: books.map(toBookViewData)
+  });
 });
 
 /**
  * Checkout route
  */
 app.get('/checkout', function(req, res) {
-  // Just hardcoding amounts here to avoid using a database
   const item = req.query.item;
-  let title, amount, error;
 
-  switch (item) {
-    case '1':
-      title = "The Art of Doing Science and Engineering"
-      amount = 2300      
-      break;
-    case '2':
-      title = "The Making of Prince of Persia: Journals 1985-1993"
-      amount = 2500
-      break;     
-    case '3':
-      title = "Working in Public: The Making and Maintenance of Open Source"
-      amount = 2800  
-      break;     
-    default:
-      // Included in layout view, feel free to assign error
-      error = "No item selected"      
-      break;
+  // Reject missing, empty, or multi-value query items before catalog lookup
+  if (typeof item !== 'string' || item === '') {
+    return res.status(400).render('checkout', {
+      error: 'Select a book to continue.'
+    });
   }
 
-  res.render('checkout', {
-    title: title,
-    amount: amount,
-    error: error
+  const book = getBookById(item);
+  if (!book) {
+    return res.status(404).render('checkout', {
+      error: 'That book is not available.'
+    });
+  }
+
+  return res.status(200).render('checkout', {
+    book: toBookViewData(book)
   });
 });
 

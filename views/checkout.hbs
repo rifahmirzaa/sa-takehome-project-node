@@ -1,32 +1,40 @@
-<div class="row justify-content-md-center">
-  <div class="col-6">
-    <div class="text-center mt-40">
-      <h1>
-        Checkout — Stripe Press
-      </h1>
-      <h5 class="text-secondary">
-        {{title}}
-      </h5>
-      <hr class="mt-40">
-      <div class="mt-20 text-info">
-        Total due: $<span class="amount" data-amount="{{amount}}"></span>
+<div class="row justify-content-center">
+  <div class="col-12 col-md-8 col-lg-6">
+    {{#if book}}
+      <div class="text-center mt-40">
+        <h1>
+          Checkout — Stripe Press
+        </h1>
+        <h5 class="text-secondary">
+          {{book.title}}
+        </h5>
       </div>
-    </div>
-    <div class="card box-shadow mt-40">
-      <div class="card-body">
-        <form name="payment-form">
-          <div>
-            <label for="email">Email address</label>
-            <input type="email" class="form-control" id="email" name="email" placeholder="you@email.com">
+      <div class="card box-shadow mt-40">
+        <div class="card-body">
+          <div class="row align-items-center">
+            <div class="col-4">
+              <img src="{{book.image}}" class="img-fluid rounded" alt="Cover of {{book.title}}">
+            </div>
+            <div class="col-8">
+              <h5 class="card-title mb-1">{{book.title}}</h5>
+              <p class="text-muted mb-2">{{book.author}}</p>
+              <p class="mb-2">Quantity: 1</p>
+              <p class="h5 text-info mb-0">Total due: {{book.formattedPrice}} {{book.currencyDisplay}}</p>
+            </div>
           </div>
-          <div class="mt-20 text-center text-secondary border-placeholder">
-            Add Stripe Element here!
-          </div>
-          <div class="mt-20">
-            <button type="submit" class="btn btn-lg btn-block btn-primary">Pay $<span class="amount" data-amount="{{amount}}"></span></button>
-          </div>
-        </form>
+          <hr class="mt-40">
+          <p class="text-muted text-center mb-0">
+            Payment is not available in this demo yet.
+          </p>
+        </div>
+        <div class="card-footer bg-transparent border-top-0 pt-0 text-center pb-3">
+          <a href="/" class="btn btn-outline-secondary btn-sm">Change book</a>
+        </div>
       </div>
-    </div>
+    {{else}}
+      <div class="text-center mt-40">
+        <a href="/" class="btn btn-primary">Browse books</a>
+      </div>
+    {{/if}}
   </div>
 </div>
