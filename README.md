@@ -4,35 +4,134 @@ A small bookshop built with Node.js, Express, Handlebars, and Stripe's Payment E
 
 The app uses direct PaymentIntents and the Payment Element. It does not use Stripe Checkout. There is no cart, account system, database, or fulfillment service.
 
-## Quick start with webhooks
+## Start here: clone to first payment
 
-On macOS, Linux, or WSL, install Node.js with npm and the [Stripe CLI](https://docs.stripe.com/stripe-cli#install) first. Clone this repository, then run:
+Follow these steps in order on macOS, Linux, or WSL. Use the manual setup below if you are running without Bash. You need internet access and a Stripe sandbox account.
 
-```bash
-npm run dev
-```
-
-On the first run, the launcher creates a private `.env` file and asks you to add `STRIPE_SECRET_KEY` and `STRIPE_PUBLISHABLE_KEY` from the same sandbox. Save those values and run `npm run dev` again. If `.env` is already configured, the launcher continues immediately.
-
-The launcher installs missing project dependencies, rejects live keys, checks CLI access, and validates the sandbox key with a read-only API request. It starts webhook forwarding, takes the signing secret from that listener, and starts the app with the secret in its environment. Existing `.env` contents are preserved. Keys are never printed, and temporary CLI logs are removed when the launcher exits.
-
-The CLI uses the app's sandbox key through `STRIPE_API_KEY`, so a separate `stripe login` is not required and a saved CLI session cannot point forwarding at a different sandbox. A restricted key needs permissions for account retrieval, webhook listening, and the application's payment operations. The publishable key must still be copied from that same sandbox; checking its format cannot prove that the pair matches.
-
-Open the URL printed by the launcher. Payment event summaries appear in the same terminal. Press **Ctrl+C** to stop both processes. If the app or listener exits unexpectedly, the launcher stops the other process too. Existing processes are never stopped by the launcher.
-
-To check configuration and authentication without starting the app:
+### 1. Clone the repository and enter the folder
 
 ```bash
-npm run dev -- --check
+git clone https://github.com/rifahmirzaa/sa-takehome-project-node.git
+cd sa-takehome-project-node
 ```
 
-If port 3000 is occupied, stop the earlier app or choose another port:
+If you have already cloned it, open a terminal in that folder. Run all commands below from the repository root, where `package.json` is located.
+
+### 2. Check Node.js and npm
 
 ```bash
-PORT=3001 npm run dev
+node --version
+npm --version
 ```
 
-`--check` may install missing dependencies and create a blank `.env`; it does not start a listener or server. The manual setup below also works without Bash.
+If either command is missing, install Node.js with npm from [nodejs.org](https://nodejs.org/en/download). Use a supported Node.js release, version 18 or newer. This project was tested with Node.js 26.3.0.
+
+### 3. Install and check Stripe CLI
+
+On macOS with Homebrew, install it once:
+
+```bash
+brew install stripe/stripe-cli/stripe
+```
+
+For Linux, WSL, or another installation method, follow the [Stripe CLI installation guide](https://docs.stripe.com/stripe-cli#install). Then check:
+
+```bash
+stripe version
+```
+
+The launcher checks for Node.js, npm, and Stripe CLI; it does **not** install these system tools. You do **not** need to run `stripe login` for this launcher: it authenticates with the sandbox key you configure next.
+
+### 4. Create the local configuration file
+
+For a fresh clone:
+
+```bash
+cp sample.env .env
+```
+
+If `.env` already exists, keep it and edit its existing values instead of copying over it. Open `.env` in your editor.
+
+### 5. Add keys from the same Stripe sandbox
+
+In the Stripe Dashboard, select your sandbox and open its API keys page. Copy its publishable key and server key into `.env`:
+
+```dotenv
+STRIPE_SECRET_KEY=sk_test_replace_with_your_key
+STRIPE_PUBLISHABLE_KEY=pk_test_replace_with_your_key
+STRIPE_WEBHOOK_SECRET=
+```
+
+Replace the example values with your actual sandbox keys. A restricted sandbox key (`rk_test_...`) can also be used if it permits account retrieval, webhook listening, and the app's payment operations. Both API keys must belong to the **same sandbox**; do not use live keys.
+
+Leave `STRIPE_WEBHOOK_SECRET` blank when using the launcher. It obtains the active listener's signing secret automatically and passes it to the server without changing `.env`. Save the file. `.env` is ignored by Git; never commit or share it.
+
+### 6. Check configuration and authentication
+
+```bash
+./scripts/dev.sh --check
+```
+
+The launcher installs missing project dependencies and checks sandbox access. Expect:
+
+```text
+Sandbox API authentication passed.
+Checks complete. The server and listener were not started.
+```
+
+Fix any reported error before continuing. If the executable permission was lost while copying the repository, run `chmod +x scripts/dev.sh`, or use `bash scripts/dev.sh --check`.
+
+### 7. Start the app and webhook listener together
+
+```bash
+./scripts/dev.sh
+```
+
+Equivalent commands are `bash scripts/dev.sh` and `npm run dev`. Do not start a separate `npm start` or `stripe listen` alongside the launcher.
+
+Wait for:
+
+```text
+Ready: http://localhost:3000
+Webhooks: Stripe sandbox -> http://localhost:3000/webhook
+```
+
+Keep this terminal open. If port 3000 is occupied, stop the previous app or use:
+
+```bash
+PORT=3001 ./scripts/dev.sh
+```
+
+Then use the printed URL, such as `http://localhost:3001`.
+
+### 8. Complete a sandbox payment
+
+Open [localhost:3000](http://localhost:3000), select a book, and enter:
+
+| Field | Test value |
+| --- | --- |
+| Card number | `4242 4242 4242 4242` |
+| Expiry | Any future date, for example `12/30` |
+| CVC | `123` |
+| Postal code | A valid postal code for the selected country |
+
+Click Pay. The receipt should show the charged amount, currency, and a PaymentIntent ID beginning with `pi_`. Find that same ID in the sandbox Dashboard to compare the payment details. The launcher terminal should also log a payment event with that intent ID and status `succeeded`.
+
+### 9. Stop or restart the demo
+
+Press **Ctrl+C** in the launcher terminal to stop both the app and listener. For later runs, use `./scripts/dev.sh` again; you do not need to recreate `.env` or copy another webhook secret. Restart after changing API keys.
+
+To run the automated checks after dependencies are installed:
+
+```bash
+npm test
+```
+
+### What the launcher handles
+
+The launcher rejects live keys, checks CLI access, and validates the sandbox server key with a read-only API request. It uses that key through `STRIPE_API_KEY`, so a saved CLI login cannot select another sandbox. It checks the publishable key's format but cannot prove that the key pair matches; copy both from the same sandbox.
+
+The listener must be ready before the server starts. Keys are not printed, existing `.env` values are preserved, and private temporary CLI logs are removed on exit. If either process exits unexpectedly, the launcher stops the other one. It stops only processes it started. There is no separate build step.
 
 ## Manual setup
 
