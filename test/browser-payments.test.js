@@ -202,3 +202,34 @@ test('redirect status alone cannot display a successful receipt', async () => {
   assert.equal(page.requests.length, 0);
   assert.equal(page.get('status-title').textContent, 'No payment reference found');
 });
+
+for (const receiptAttemptId of [attempt.attemptId, 'older-attempt', null]) {
+  test(`cancellation clears only its own attempt (${receiptAttemptId})`, async () => {
+    const storage = saved(attempt);
+    const receipt = await load('success.js', {
+      storage, search: '?payment_intent_client_secret=' + attempt.clientSecret,
+      fetcher: async () => ok({ status: 'canceled', bookId: '1', attemptId: receiptAttemptId })
+    });
+    assert.equal(receipt.get('status-title').textContent, 'Payment canceled');
+    assert.equal(storage.has(key), receiptAttemptId !== attempt.attemptId);
+
+    if (receiptAttemptId === attempt.attemptId) {
+      const checkout = await load('checkout.js', {
+        storage, fetcher: async () => ok({ clientSecret: 'pi_new_secret_valid' })
+      });
+      assert.equal(checkout.requests[0].url, '/create-payment-intent');
+      assert.notEqual(checkout.requests[0].body.attemptId, attempt.attemptId);
+      assert.equal(checkout.paymentElements.length, 1);
+    }
+  });
+}
+
+for (const status of ['processing', 'requires_payment_method', 'requires_action']) {
+  test(`${status} receipt preserves the attempt for recovery`, async () => {
+    const page = await load('success.js', {
+      storage: saved(attempt), search: '?payment_intent_client_secret=' + attempt.clientSecret,
+      fetcher: async () => ok({ status, bookId: '1', attemptId: attempt.attemptId })
+    });
+    assert.equal(page.storage.get(key), JSON.stringify(attempt));
+  });
+}

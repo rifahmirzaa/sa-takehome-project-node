@@ -108,8 +108,8 @@
       const data = await res.json();
       const status = data.status;
 
-      if (status === 'succeeded') {
-        // Clear stored attempt only when the verified attempt ID matches storage
+      if (status === 'succeeded' || status === 'canceled') {
+        // Clear only the matching attempt after Stripe reports a final outcome
         if (data.bookId && data.attemptId) {
           try {
             const storedRaw = sessionStorage.getItem('checkout_attempt_' + data.bookId);
@@ -121,7 +121,9 @@
             }
           } catch (e) {}
         }
+      }
 
+      if (status === 'succeeded') {
         renderState({
           iconHtml: '<i class="far fa-check-circle text-success fa-3x"></i>',
           title: 'Payment successful',
