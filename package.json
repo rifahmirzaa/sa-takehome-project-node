@@ -4,7 +4,8 @@
   "description": "SA Takehome Project",
   "scripts": {
     "start": "node app.js",
-    "test": "node --test"
+    "test": "node --test",
+    "dev": "bash scripts/dev.sh"
   },
   "author": "Matt Mitchell",
   "license": "MIT",

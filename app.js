@@ -209,8 +209,9 @@ app.get('/success', function(req, res) {
 
 // Guard app.listen so tests can import the Express application directly
 if (require.main === module) {
-  app.listen(3000, () => {
-    console.log('Getting served on port 3000');
+  const port = Number(process.env.PORT || 3000);
+  app.listen(port, () => {
+    console.log('Getting served on port ' + port);
   });
 }
 
