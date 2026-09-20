@@ -190,6 +190,10 @@ app.post('/payment-status', async function(req, res) {
       attemptId: intent.metadata?.attemptId || null
     });
   } catch (err) {
+    // Nonexistent payment intents return 404; transient failures return 502
+    if (err.statusCode === 404 || err.code === 'resource_missing') {
+      return res.status(404).json({ error: 'Payment record not found' });
+    }
     return res.status(502).json({ error: 'Payment status temporarily unavailable' });
   }
 });

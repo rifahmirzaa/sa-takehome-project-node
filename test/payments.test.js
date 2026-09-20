@@ -325,3 +325,52 @@ test('payments helper functions validate and parse client secrets', () => {
   assert.equal(payments.extractPaymentIntentId('pi_3UHO4dICrHVTMrD0_secret_abc123'), 'pi_3UHO4dICrHVTMrD0');
   assert.equal(payments.extractPaymentIntentId('invalid'), null);
 });
+
+test('POST /payment-status returns 404 for nonexistent PaymentIntent and 502 for temporary failure', async () => {
+  const mockClient = {
+    paymentIntents: {
+      retrieve: async (id) => {
+        if (id === 'pi_nonexistent123') {
+          const notFoundError = new Error('No such payment_intent: pi_nonexistent123');
+          notFoundError.statusCode = 404;
+          notFoundError.code = 'resource_missing';
+          throw notFoundError;
+        }
+        if (id === 'pi_temporaryerror123') {
+          const serverError = new Error('Upstream timeout');
+          serverError.statusCode = 500;
+          throw serverError;
+        }
+        throw new Error('Unexpected');
+      }
+    }
+  };
+
+  payments.setStripeClientForTest(mockClient);
+
+  const { baseUrl, close } = await startServer();
+  try {
+    // Nonexistent PaymentIntent maps to 404
+    const resNotFound = await fetch(`${baseUrl}/payment-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientSecret: 'pi_nonexistent123_secret_abc' })
+    });
+    assert.equal(resNotFound.status, 404);
+    const dataNotFound = await resNotFound.json();
+    assert.equal(dataNotFound.error, 'Payment record not found');
+
+    // Temporary upstream error maps to 502
+    const resTemp = await fetch(`${baseUrl}/payment-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientSecret: 'pi_temporaryerror123_secret_abc' })
+    });
+    assert.equal(resTemp.status, 502);
+    const dataTemp = await resTemp.json();
+    assert.equal(dataTemp.error, 'Payment status temporarily unavailable');
+  } finally {
+    payments.setStripeClientForTest(null);
+    await close();
+  }
+});
