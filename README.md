@@ -18,8 +18,11 @@ Direct PaymentIntents are used to keep the buyer on the customized checkout page
 To prevent unauthenticated callers from inspecting arbitrary `pi_` payment intents, `POST /payment-status` requires the `payment_intent_client_secret`. The server checks that the secret matches the retrieved Stripe intent and verifies application metadata (`integration: 'sa-takehome-demo'`). The return URL parameter `redirect_status` is not trusted as proof of payment; only `amount_received` reported directly by Stripe is displayed.
 
 ### Single-Tab Attempt Tracking & Idempotency
-Each purchase attempt generates a bounded UUID stored in `sessionStorage` alongside creation timestamp. Stripe API calls include an idempotency key derived from the book and attempt ID (`demo-book-<id>-attempt-<uuid>`).
-- *Demo limitation*: Attempt storage is bounded to a 24-hour window in `sessionStorage`. This demo does not feature a persistent database, shopping cart, or cross-browser cart synchronization.
+Each purchase attempt saves a UUID and timestamp in `sessionStorage` before requesting a PaymentIntent. Stripe API calls use an idempotency key derived from the book and attempt ID (`demo-book-<id>-attempt-<uuid>`). A lost response can be retried with the same key; a known intent is checked before the payment form is reopened. Temporary status errors leave the attempt intact, and an old receipt clears storage only if its attempt ID matches.
+
+Stripe can remove [idempotency keys after 24 hours](https://docs.stripe.com/api/idempotent_requests). If an older attempt has no saved client secret, checkout stops for manual reconciliation instead of creating another intent. For this demo, inspect the sandbox request logs and PaymentIntent metadata (`bookId` and `attemptId`) in the Stripe Dashboard before resetting the attempt. Known intents can still be retrieved after 24 hours.
+
+*Demo limitation*: This recovery works within one browser tab while its storage remains available. A production application should persist orders and PaymentIntent IDs on the server, with a support flow for unresolved payments. Clearing browser storage or switching browsers loses this association.
 
 ### Webhook Event Observation
 The webhook endpoint at `/webhook` validates cryptographic signatures using the Stripe signing secret (`whsec_...`). Handled events include `payment_intent.succeeded`, `payment_intent.processing`, and `payment_intent.payment_failed`.
@@ -81,9 +84,10 @@ npm test
 | Catalog Integrity | Server enforces catalog prices ($23, $25, $28); ignores client overrides | Passed |
 | Input Validation | Malformed or missing `itemId` / non-UUID `attemptId` return HTTP 400 | Passed |
 | Status Verification | Malformed secrets return 400; mismatched/unrelated intents return 404 | Passed |
-| Secrets Protection | Client secret and billing data are never exposed in JSON or HTML | Passed |
+| Secrets Protection | Server API key stays on the server; only the client secret needed by Stripe.js is returned to checkout | Passed |
 | Webhook Verification | Missing/invalid signatures return 400; valid signatures return 200 | Passed |
-| Live Sandbox Payments | Created and verified real PaymentIntents in Stripe test mode | Verified via SDK & Stripe MCP |
+| Live Sandbox Payments | Created and verified real PaymentIntents in Stripe test mode | Verified via SDK and browser |
 | Live CLI Webhooks | `stripe listen` + `stripe trigger` received and verified | Verified with real test events |
 | Decline & Retry | Card decline handled; retry succeeds on same intent without duplicate | Verified in Stripe test mode |
-| 3D Secure (3DS) | `requires_action` correctly halts success claim and prompts completion | Verified in Stripe test mode |
+| Checkout Recovery | Lost responses, status outages, expired attempts, retry readiness, and receipt cleanup | Automated tests |
+| 3D Secure (3DS) | Complete the sandbox challenge and show the verified $28.00 receipt | Verified in browser |

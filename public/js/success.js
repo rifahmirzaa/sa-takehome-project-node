@@ -109,10 +109,16 @@
       const status = data.status;
 
       if (status === 'succeeded') {
-        // Clear stored attempt only after verified success for matching book
-        if (data.bookId) {
+        // Clear stored attempt only when the verified attempt ID matches storage
+        if (data.bookId && data.attemptId) {
           try {
-            sessionStorage.removeItem('checkout_attempt_' + data.bookId);
+            const storedRaw = sessionStorage.getItem('checkout_attempt_' + data.bookId);
+            if (storedRaw) {
+              const stored = JSON.parse(storedRaw);
+              if (stored && stored.attemptId === data.attemptId) {
+                sessionStorage.removeItem('checkout_attempt_' + data.bookId);
+              }
+            }
           } catch (e) {}
         }
 
