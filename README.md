@@ -1,95 +1,138 @@
-# Take home project — Stripe Press
+# Stripe Press
 
-An e-commerce book purchase demo built with Express, Handlebars, Bootstrap, and the Stripe Payment Element.
+A small bookshop built with Node.js, Express, Handlebars, and Stripe's Payment Element. Choose one of three books, pay without leaving the shop for a hosted checkout page, and see a verified receipt with the charged amount, currency, and Stripe PaymentIntent ID.
 
-## Features
+The app uses direct PaymentIntents and the Payment Element. It does not use Stripe Checkout. There is no cart, account system, database, or fulfillment service.
 
-- **Catalog & Order Summary**: Browse the catalog of three books on `/` and view server-owned pricing on `/checkout?item=:id`.
-- **Payment Element Checkout**: Purchase the selected book using Stripe's Payment Element with dynamic payment methods. Card data never touches the application server.
-- **Verified Purchase Confirmation**: `/success` checks payment status against Stripe using the returned `payment_intent_client_secret`, displaying the exact `amount_received`, currency, and `pi_` ID.
-- **Webhook Event Handling**: `POST /webhook` verifies `Stripe-Signature` using `express.raw()` and Stripe SDK, observing asynchronous payment lifecycle events.
+## Run locally
 
-## Architecture & Integration Decisions
+You need Node.js 18 or newer, npm, and a Stripe sandbox account. Use a currently supported Node.js release; the submission was tested with Node.js 26.3.0. Internet access is required for Stripe.js and the page's CDN assets. The Stripe CLI is needed only for forwarding webhook events.
 
-### Direct PaymentIntents vs. Stripe Checkout
-Direct PaymentIntents are used to keep the buyer on the customized checkout page with the order summary and book artwork, adhering to the integration requirement excluding Stripe Checkout.
+1. Extract the submitted ZIP and open a terminal in its project folder. If using GitHub instead, clone the submitted repository and enter its root directory.
+2. Install dependencies and create a local configuration file:
 
-### Client-Secret-Protected Status Retrieval
-To prevent unauthenticated callers from inspecting arbitrary `pi_` payment intents, `POST /payment-status` requires the `payment_intent_client_secret`. The server checks that the secret matches the retrieved Stripe intent and verifies application metadata (`integration: 'sa-takehome-demo'`). The return URL parameter `redirect_status` is not trusted as proof of payment; only `amount_received` reported directly by Stripe is displayed.
+   ```bash
+   npm ci
+   cp sample.env .env
+   ```
 
-### Single-Tab Attempt Tracking & Idempotency
-Each purchase attempt saves a UUID and timestamp in `sessionStorage` before requesting a PaymentIntent. Stripe API calls use an idempotency key derived from the book and attempt ID (`demo-book-<id>-attempt-<uuid>`). A lost response can be retried with the same key; a known intent is checked before the payment form is reopened. Temporary status errors leave the attempt intact, and an old receipt clears storage only if its attempt ID matches.
+3. Add the publishable and secret API keys from the **same Stripe sandbox** to `.env`:
 
-Stripe can remove [idempotency keys after 24 hours](https://docs.stripe.com/api/idempotent_requests). If an older attempt has no saved client secret, checkout stops for manual reconciliation instead of creating another intent. For this demo, inspect the sandbox request logs and PaymentIntent metadata (`bookId` and `attemptId`) in the Stripe Dashboard before resetting the attempt. Known intents can still be retrieved after 24 hours.
+   ```dotenv
+   STRIPE_SECRET_KEY=sk_test_...
+   STRIPE_PUBLISHABLE_KEY=pk_test_...
+   STRIPE_WEBHOOK_SECRET=
+   ```
 
-*Demo limitation*: This recovery works within one browser tab while its storage remains available. A production application should persist orders and PaymentIntent IDs on the server, with a support flow for unresolved payments. Clearing browser storage or switching browsers loses this association.
+   Replace the examples with your own keys. The secret key stays on the server; the publishable key is passed to Stripe.js. `.env` is ignored by Git and is not included in the submission.
+4. Start the app:
 
-### Webhook Event Observation
-The webhook endpoint at `/webhook` validates cryptographic signatures using the Stripe signing secret (`whsec_...`). Handled events include `payment_intent.succeeded`, `payment_intent.processing`, and `payment_intent.payment_failed`.
-- *Demo limitation*: In the absence of a database or email service, the webhook logs event receipt for monitoring and auditability. Order fulfillment and receipt emails are outside the scope of this assignment.
+   ```bash
+   npm start
+   ```
 
-## Setup & Running Locally
+5. Open [localhost:3000](http://localhost:3000). Select a book to reach checkout.
 
-### 1. Prerequisites
-- Node.js (v18+)
-- Stripe CLI (for webhook forwarding and sandbox testing)
+There is no compilation or separate build step. Restart the server after editing `.env`. Configuration, templates, and static assets resolve relative to `app.js`, so the repository can be moved without editing file paths. Browser requests use the current site, and the payment return URL is built from `window.location.origin`.
 
-### 2. Installation
+### Webhook forwarding
+
+In a second terminal, authenticate the [Stripe CLI](https://docs.stripe.com/stripe-cli) against the same account and sandbox used by the app:
+
 ```bash
-git clone https://github.com/rifahmirzaa/sa-takehome-project-node.git
-cd sa-takehome-project-node
-npm ci
-```
-
-### 3. Environment Configuration
-Copy `sample.env` to `.env`:
-```bash
-cp sample.env .env
-```
-
-Configure your sandbox API keys in `.env`:
-```dotenv
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_PUBLISHABLE_KEY=pk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
-```
-
-*Note: Book browsing on `/` remains functional without Stripe keys; checkout gracefully notifies users if payment configuration is missing.*
-
-### 4. Running the Webhook Listener
-In a separate terminal, forward webhook events to the local endpoint:
-```bash
+stripe login
 stripe listen --events payment_intent.succeeded,payment_intent.processing,payment_intent.payment_failed --forward-to localhost:3000/webhook
 ```
-Copy the printed signing secret (`whsec_...`) to `STRIPE_WEBHOOK_SECRET` in your `.env`.
 
-### 5. Start the Server
-```bash
-npm start
-```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Copy the listener's `whsec_...` signing secret into `STRIPE_WEBHOOK_SECRET` in `.env`, then restart the app. Keep the listener running. A sandbox payment should produce a forwarded event with an HTTP 200 response and a short event log in the app terminal.
 
-Configuration, templates, and static files resolve relative to `app.js`, so moving the repository or launching it from another working directory requires no file-path changes. Browser assets use site-relative URLs, and the payment return URL uses the current browser origin.
+Checkout and receipt verification work without the listener. The webhook endpoint demonstrates signature verification and event observation; it does not ship a book or send email. A Dashboard endpoint's signing secret is different from the local listener's secret.
 
-## Testing & Verification
+## How it works
 
-Run the automated test suite (using Node's built-in test runner):
+The server owns the catalog and prices: $23.00, $25.00, and $28.00 USD, with quantity fixed at one. The browser submits a book ID and checkout attempt ID, never a trusted amount.
+
+1. Express renders the selected book and order summary.
+2. The browser saves an attempt ID before asking the server to create a PaymentIntent. The server uses the catalog price and an idempotency key derived from the book and attempt.
+3. Stripe.js mounts the Payment Element using the returned client secret. Payment details go directly to Stripe.
+4. `stripe.confirmPayment` submits the payment and handles any required authentication or redirect.
+5. The return page sends the client secret to the server. The server retrieves the intent, checks the secret and application metadata, and returns its verified status. Only `succeeded` produces a purchase confirmation with `amount_received`, currency, and the `pi_` ID.
+
+[Design and sequence diagrams](docs/design.md) describe the component boundaries, payment flow, recovery flow, and webhook handling.
+
+### Stripe APIs used
+
+| Operation | Purpose |
+| --- | --- |
+| `stripe.paymentIntents.create` — `POST /v1/payment_intents` | Create the payment with the server-owned amount, currency, metadata, automatic capture, and an idempotency key |
+| `stripe.elements` and `elements.create('payment')` | Mount Stripe's Payment Element with available payment methods |
+| `stripe.confirmPayment` | Submit payment details and handle further customer authentication |
+| `stripe.paymentIntents.retrieve` — `GET /v1/payment_intents/:id` | Verify status and charged amount for receipts and resumed checkouts |
+| `stripe.webhooks.constructEvent` | Verify the raw webhook body and signature locally using the Stripe SDK |
+
+The server pins Stripe API version `2026-08-26.dahlia`; `package-lock.json` locks the installed SDK and other dependencies.
+
+## Approach and challenges
+
+The implementation keeps the starter application's Express and Handlebars structure. Book selection came first, with a shared catalog used for both the display and payment amount. The next step added PaymentIntent creation, the Payment Element, and a receipt based on a fresh server-side retrieval. Payment code lives in `lib/payments.js` so additional Stripe operations can be added without changing the catalog or templates.
+
+The main challenge was handling uncertainty after a network failure. A failed request does not prove that Stripe failed to create the payment. Checkout therefore saves the attempt before sending the request, retries with the same idempotency key, and preserves the attempt when a status check fails. An unresolved attempt older than 24 hours stops for manual reconciliation because Stripe can prune old idempotency keys.
+
+A second challenge was separating successful payment from a successful redirect. The receipt ignores `redirect_status` as evidence and displays pending, failed, and incomplete states separately. Refreshing an old receipt must also leave a newer purchase attempt intact. Verified success or cancellation clears only the matching stored attempt.
+
+Initialization errors and declined payments need different recovery actions. Pay remains disabled until the Payment Element is ready; initialization failures offer a separate retry. A declined card can be corrected and retried on the same intent. Webhook verification also requires care: its raw-body route must run before Express's JSON parser.
+
+## Verify the demo
+
+### Automated checks
+
 ```bash
 npm test
 ```
 
-### Verification Matrix
+The 32 tests cover server-owned pricing, input validation, payment-status checks, webhook routing, receipt handling, retry recovery, cancellation, and running a relocated copy from another working directory. They use Node's built-in test runner with controlled Stripe and browser boundaries. They do not contact Stripe or require API keys. There is no separate test dependency installation.
 
-| Check | Scenario | Result |
+### Sandbox walkthrough
+
+Use only sandbox keys and Stripe test cards. Enter any future expiry date, any three-digit CVC, and a valid postal code where requested.
+
+| Scenario | Test card or action | Expected result |
 | --- | --- | --- |
-| Route Security | `GET /checkout`, `GET /success` return `no-store`, `no-referrer`, CSP | Passed |
-| Catalog Integrity | Server enforces catalog prices ($23, $25, $28); ignores client overrides | Passed |
-| Input Validation | Malformed or missing `itemId` / non-UUID `attemptId` return HTTP 400 | Passed |
-| Status Verification | Malformed secrets return 400; mismatched/unrelated intents return 404 | Passed |
-| Secrets Protection | Server API key stays on the server; only the client secret needed by Stripe.js is returned to checkout | Passed |
-| Webhook Verification | Missing/invalid signatures return 400; valid signatures return 200 | Passed |
-| Live Sandbox Payments | Created and verified real PaymentIntents in Stripe test mode | Verified via SDK and browser |
-| Live CLI Webhooks | `stripe listen` + `stripe trigger` received and verified | Verified with real test events |
-| Decline & Retry | Card decline handled; retry succeeds on same intent without duplicate | Verified in Stripe test mode |
-| Checkout Recovery | Lost responses, status outages, expired attempts, retry readiness, and receipt cleanup | Automated tests |
-| 3D Secure (3DS) | Complete the sandbox challenge and show the verified $28.00 receipt | Verified in browser |
+| Selection | Select each book | Correct title and USD price on checkout |
+| Successful payment | `4242 4242 4242 4242` | Receipt shows the charged amount, currency, and `pi_` ID |
+| Decline and retry | `4000 0000 0000 9995`, then the success card | Insufficient-funds error, then success using the same PaymentIntent |
+| 3D Secure | `4000 0025 0000 3155` | Complete the sandbox challenge, then see a verified receipt |
+| Receipt refresh | Refresh a successful receipt | Same amount and intent; no additional payment |
+| Invalid selection | Visit `/checkout?item=999` | Error with a way back to the catalog |
+| Cancellation | Cancel an unpaid intent in the sandbox Dashboard, then reload checkout | Canceled receipt; selecting that book again starts a new attempt |
+
+Compare the receipt's ID, amount, currency, and status with the PaymentIntent in the same sandbox Dashboard. With the CLI listener running, check that the webhook receives HTTP 200.
+
+Separate browser verification exercised successful payment, decline followed by retry, 3D Secure, receipt refresh, a dropped creation response, a temporary status outage, and cancellation followed by a new checkout for the same book. These checks are separate from `npm test`.
+
+### Troubleshooting
+
+- **Configuration unavailable:** fill in both API keys and restart the server. The blank sample configuration intentionally leaves checkout disabled.
+- **Payment form fails to load:** check the network, browser blockers, and that both keys belong to the same sandbox. Retry initialization without clearing the saved attempt.
+- **Status cannot be verified:** retry the status check. Do not assume the customer was not charged.
+- **Old checkout needs reconciliation:** inspect Stripe request logs and intent metadata for the stored `bookId` and `attemptId` before resetting the attempt. This demo has no support console or automatic reconciliation service.
+- **Webhook returns 400:** check the active CLI listener's signing secret, restart after changing `.env`, and confirm the listener is using the same sandbox.
+- **Port 3000 is occupied:** stop the previous local app before starting another copy.
+
+## What a production version would add
+
+The first extension would be persistent orders, recording the book, agreed price, PaymentIntent ID, and payment state on the server. That would allow recovery across tabs and devices and provide a proper support workflow for unresolved attempts.
+
+Fulfillment would run from verified webhook events, with duplicate-event handling and state checks so retries cannot ship or email twice. It would not depend on the customer returning to the receipt page. A queue could handle shipping and receipt delivery with retries.
+
+Further work would depend on the shop's needs: inventory reservations, shipping addresses, tax calculation, refunds, and customer accounts. Deployment would also need HTTPS, managed secrets, rate limits, and operational monitoring. The current demo uses only USD, has no inventory enforcement, and observes webhooks without fulfilling orders.
+
+## Documentation consulted
+
+- [Payment Element](https://docs.stripe.com/payments/payment-element) — the embedded payment UI
+- [PaymentIntents](https://docs.stripe.com/payments/payment-intents) — the payment lifecycle, client secrets, and reuse
+- [Idempotent requests](https://docs.stripe.com/api/idempotent_requests) — retry behavior and key retention
+- [Webhooks](https://docs.stripe.com/webhooks) — raw-body signature verification and event delivery
+- [Testing](https://docs.stripe.com/testing) — sandbox cards, declines, and authentication
+
+The project builds on the supplied [Node.js starter](https://github.com/mattmitchell6/sa-takehome-project-node).
