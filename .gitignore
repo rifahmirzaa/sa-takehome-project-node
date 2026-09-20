@@ -1,6 +1,3 @@
 node_modules/
 .DS_Store
 .env
-# Local Antigravity implementation plan
-/ANTIGRAVITY_PLAN.md
-/ANTIGRAVITY_PAYMENTS_PLAN.md
