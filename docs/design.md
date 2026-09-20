@@ -31,7 +31,8 @@ flowchart LR
 | `views/` | Catalog, checkout, receipt shell, and shared layout |
 | `public/js/checkout.js` | Attempt storage, Payment Element lifecycle, and payment confirmation |
 | `public/js/success.js` | Verified receipt states and matching-attempt cleanup |
-| `test/` | Route, browser-script, and file-path portability checks |
+| `scripts/dev.sh` | Local prerequisite checks, CLI authentication, webhook forwarding, server startup, and process cleanup |
+| `test/` | Route, browser-script, file-path portability, and launcher checks |
 
 The server trusts its own catalog for pricing. Stripe receives payment details directly from Stripe.js. The application stores only an attempt ID, its creation time, and the client secret in the current tab's session storage; it does not store card data.
 
@@ -160,3 +161,7 @@ sequenceDiagram
 Webhook delivery is independent of the receipt-page visit and may arrive before or after it. The raw-body middleware is registered before the general JSON parser. The endpoint observes `payment_intent.succeeded`, `payment_intent.processing`, and `payment_intent.payment_failed`; other verified events are acknowledged without additional work.
 
 Repeated events can produce repeated logs, but there are no fulfillment side effects. A production extension would persist the order and processed event IDs, reconcile the payment state, and trigger fulfillment once. Receipt redirects would remain a customer convenience rather than a dependency for fulfilling an order.
+
+## Local launcher
+
+`npm run dev` runs the Bash script in `scripts/dev.sh`. It uses the sandbox key from `.env` for CLI authentication, starts a listener on the selected local port, and injects that listener’s signing secret into the server process. It waits for a successful HTTP response before reporting readiness. Temporary logs use a private directory and are deleted on exit. The launcher stops only the processes it starts, including when either one fails. `PORT` defaults to 3000.

@@ -4,11 +4,46 @@ A small bookshop built with Node.js, Express, Handlebars, and Stripe's Payment E
 
 The app uses direct PaymentIntents and the Payment Element. It does not use Stripe Checkout. There is no cart, account system, database, or fulfillment service.
 
-## Run locally
+## Quick start with webhooks
+
+On macOS, Linux, or WSL, install Node.js with npm and the [Stripe CLI](https://docs.stripe.com/stripe-cli#install) first. Clone this repository, then run:
+
+```bash
+npm run dev
+```
+
+On the first run, the launcher creates a private `.env` file and asks you to add `STRIPE_SECRET_KEY` and `STRIPE_PUBLISHABLE_KEY` from the same sandbox. Save those values and run `npm run dev` again. If `.env` is already configured, the launcher continues immediately.
+
+The launcher installs missing project dependencies, rejects live keys, checks CLI access, and validates the sandbox key with a read-only API request. It starts webhook forwarding, takes the signing secret from that listener, and starts the app with the secret in its environment. Existing `.env` contents are preserved. Keys are never printed, and temporary CLI logs are removed when the launcher exits.
+
+The CLI uses the app's sandbox key through `STRIPE_API_KEY`, so a separate `stripe login` is not required and a saved CLI session cannot point forwarding at a different sandbox. A restricted key needs permissions for account retrieval, webhook listening, and the application's payment operations. The publishable key must still be copied from that same sandbox; checking its format cannot prove that the pair matches.
+
+Open the URL printed by the launcher. Payment event summaries appear in the same terminal. Press **Ctrl+C** to stop both processes. If the app or listener exits unexpectedly, the launcher stops the other process too. Existing processes are never stopped by the launcher.
+
+To check configuration and authentication without starting the app:
+
+```bash
+npm run dev -- --check
+```
+
+If port 3000 is occupied, stop the earlier app or choose another port:
+
+```bash
+PORT=3001 npm run dev
+```
+
+`--check` may install missing dependencies and create a blank `.env`; it does not start a listener or server. The manual setup below also works without Bash.
+
+## Manual setup
 
 You need Node.js 18 or newer, npm, and a Stripe sandbox account. Use a currently supported Node.js release; the submission was tested with Node.js 26.3.0. Internet access is required for Stripe.js and the page's CDN assets. The Stripe CLI is needed only for forwarding webhook events.
 
-1. Extract the submitted ZIP and open a terminal in its project folder. If using GitHub instead, clone the submitted repository and enter its root directory.
+1. Clone the repository and enter its root directory:
+
+   ```bash
+   git clone https://github.com/rifahmirzaa/sa-takehome-project-node.git
+   cd sa-takehome-project-node
+   ```
 2. Install dependencies and create a local configuration file:
 
    ```bash
@@ -90,7 +125,7 @@ Initialization errors and declined payments need different recovery actions. Pay
 npm test
 ```
 
-The 32 tests cover server-owned pricing, input validation, payment-status checks, webhook routing, receipt handling, retry recovery, cancellation, and running a relocated copy from another working directory. They use Node's built-in test runner with controlled Stripe and browser boundaries. They do not contact Stripe or require API keys. There is no separate test dependency installation.
+The automated tests cover server-owned pricing, input validation, payment-status checks, webhook routing, receipt handling, retry recovery, cancellation, running a relocated copy from another working directory, and the launcher’s configuration, authentication, startup, and cleanup behavior. They use Node's built-in test runner with controlled Stripe and browser boundaries. They do not contact Stripe or require API keys. There is no separate test dependency installation.
 
 ### Sandbox walkthrough
 
@@ -117,7 +152,9 @@ Separate browser verification exercised successful payment, decline followed by 
 - **Status cannot be verified:** retry the status check. Do not assume the customer was not charged.
 - **Old checkout needs reconciliation:** inspect Stripe request logs and intent metadata for the stored `bookId` and `attemptId` before resetting the attempt. This demo has no support console or automatic reconciliation service.
 - **Webhook returns 400:** check the active CLI listener's signing secret, restart after changing `.env`, and confirm the listener is using the same sandbox.
-- **Port 3000 is occupied:** stop the previous local app before starting another copy.
+- **Port 3000 is occupied:** stop the previous local app or run `PORT=3001 npm run dev`.
+- **Launcher cannot authenticate:** check the sandbox key and network access. Restricted keys also need the permissions used by the CLI and the app.
+- **Stripe CLI is missing:** install it using the linked Stripe CLI guide. The launcher checks prerequisites but does not install system tools.
 
 ## What a production version would add
 
