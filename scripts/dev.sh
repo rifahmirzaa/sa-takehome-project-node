@@ -56,7 +56,7 @@ export STRIPE_API_KEY="$STRIPE_SECRET_KEY"
 
 listener_pid=''
 server_pid=''
-run_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/stripe-press.XXXXXX")"
+run_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/book-nook.XXXXXX")"
 cleanup() {
   local status=$?
   trap - EXIT
