@@ -1,8 +1,10 @@
 # Design
 
-The application is one Express process serving Handlebars pages, browser scripts, and three payment endpoints. The catalog is a small module; payment operations are isolated in another module. This keeps the demo easy to run and leaves a clear place to add another Stripe feature during an interview.
+[Overview](../README.md) · [Setup](setup.md) · [Components](#components) · [Purchase](#purchase-and-confirmation) · [Recovery](#retry-and-recovery) · [Webhooks](#webhook-delivery)
 
 ## Components
+
+One Express process serves pages and payment endpoints. Stripe operations are isolated in a helper module; the [code map](../README.md#architecture) identifies each file.
 
 ```mermaid
 flowchart LR
@@ -20,21 +22,14 @@ flowchart LR
     App --> Payments
     Payments --> Stripe
     Element --> Stripe
-    Stripe -->|Signed webhook events| App
+    CLI[Stripe CLI local listener]
+    Stripe -->|Sandbox events| CLI
+    CLI -->|Signed webhook requests| App
 ```
 
-| File or directory | Responsibility |
-| --- | --- |
-| `app.js` | Routes, request validation, rendering, security headers, and raw webhook parsing |
-| `lib/catalog.js` | Book IDs, display information, and amounts in minor currency units |
-| `lib/payments.js` | Stripe client, PaymentIntent creation/retrieval, and signature verification |
-| `views/` | Catalog, checkout, receipt shell, and shared layout |
-| `public/js/checkout.js` | Attempt storage, Payment Element lifecycle, and payment confirmation |
-| `public/js/success.js` | Verified receipt states and matching-attempt cleanup |
-| `scripts/dev.sh` | Local prerequisite checks, CLI authentication, webhook forwarding, server startup, and process cleanup |
-| `test/` | Route, browser-script, file-path portability, and launcher checks |
-
-The server trusts its own catalog for pricing. Stripe receives payment details directly from Stripe.js. The application stores only an attempt ID, its creation time, and the client secret in the current tab's session storage; it does not store card data.
+- **Server:** owns pricing and holds the secret API key.
+- **Browser:** receives the publishable key and payment client secret; session storage retains the attempt for recovery.
+- **Stripe:** collects payment details and holds payment records. The app does not store card data.
 
 ## Purchase and confirmation
 
@@ -78,18 +73,22 @@ sequenceDiagram
     end
 ```
 
-The return page never treats `redirect_status=succeeded` as proof of payment. It shows a loading state until the server response arrives. The status endpoint requires the full client secret and checks the intent's `integration` metadata before returning the limited receipt fields.
+The receipt checks the client secret and `integration` metadata against a freshly retrieved intent. A redirect alone cannot confirm payment.
 
-| App endpoint | Input and behavior |
+### Application endpoints
+
+| Endpoint | Behavior |
 | --- | --- |
-| `GET /` | Render the catalog |
-| `GET /checkout?item=:id` | Validate the selected book and render its order summary |
-| `POST /create-payment-intent` | Accept `{ itemId, attemptId }`; validate the ID and UUID; create using catalog price; return `{ clientSecret }` |
-| `POST /payment-status` | Accept `{ clientSecret }`; retrieve and verify the intent; return status, amount received, currency, intent ID, book ID, and attempt ID |
-| `GET /success` | Render the receipt shell; the browser then requests verified status |
-| `POST /webhook` | Verify the signed raw body and observe payment events |
+| `GET /` | Render the book catalog |
+| `GET /checkout?item=:id` | Validate the selection and render checkout |
+| `POST /create-payment-intent` | Accept `{ itemId, attemptId }`; use catalog pricing; return `{ clientSecret }` |
+| `POST /payment-status` | Accept `{ clientSecret }`; return verified status, received amount, currency, intent ID, book ID, and attempt ID |
+| `GET /success` | Render the receipt shell; the browser requests payment status |
+| `POST /webhook` | Verify the signature and log relevant events |
 
-The status endpoint returns 400 for malformed references, 404 for missing or mismatched records, and 502 for temporary retrieval failures. Checkout and receipt pages send `no-store`, `no-referrer`, and a Content Security Policy permitting the required Stripe resources. API responses containing payment information use `no-store`. Client secrets are sensitive payment references and should not be logged or shared.
+- Status errors: **400** for malformed references, **404** for missing/mismatched records, **502** for temporary retrieval failures.
+- Payment pages use `no-store`, `no-referrer`, and a Content Security Policy. Payment API responses use `no-store`.
+- Client secrets grant access to a payment; do not log or share them. This is not customer account authentication.
 
 ## Retry and recovery
 
@@ -124,19 +123,18 @@ sequenceDiagram
     end
 ```
 
-The create retry in this diagram is allowed only while the attempt is under 24 hours old. If it is older and has no saved client secret, checkout stops for manual reconciliation. A known intent can still be retrieved after that time. This is a browser recovery strategy, not a persistent order system: clearing storage or using another browser loses the association.
+Creation retries reuse the attempt's idempotency key while it is under 24 hours old. Older attempts without a saved client secret stop for reconciliation; known intents remain retrievable. Clearing storage or switching devices loses the association.
 
-| Verified state | Customer experience | Stored attempt |
+| Verified state | Customer action | Stored attempt |
 | --- | --- | --- |
-| `succeeded` | Receipt with the charged amount and ID | Clear only if the attempt ID matches |
-| `canceled` | Canceled receipt; return to catalog to buy again | Clear only if the attempt ID matches |
-| `processing` | Pending message and Check again | Preserve |
-| `requires_payment_method` | Retry payment with corrected details | Preserve and reuse |
-| `requires_action` / `requires_confirmation` | Return to checkout to finish | Preserve and reuse |
-| Other state | Neutral incomplete-payment message | Preserve |
-| Network or status error | Retry without assuming failure or success | Preserve |
+| `succeeded` | View receipt | Clear matching attempt |
+| `canceled` | Return to catalog | Clear matching attempt |
+| `processing` | Check again | Preserve |
+| `requires_payment_method` | Correct details and retry | Reuse |
+| `requires_action` / `requires_confirmation` | Return to checkout | Reuse |
+| Other state or retrieval error | Follow status message or retry check | Preserve |
 
-An old receipt cannot clear a newer attempt for the same book. Pay is enabled only after the Payment Element is ready, and repeated submit actions are guarded while confirmation is in progress.
+Pay stays disabled until the Element is ready and while confirmation is in progress. An old receipt cannot clear a newer attempt.
 
 ## Webhook delivery
 
@@ -158,10 +156,11 @@ sequenceDiagram
     end
 ```
 
-Webhook delivery is independent of the receipt-page visit and may arrive before or after it. The raw-body middleware is registered before the general JSON parser. The endpoint observes `payment_intent.succeeded`, `payment_intent.processing`, and `payment_intent.payment_failed`; other verified events are acknowledged without additional work.
+- The raw-body route runs before Express's JSON parser so signature verification receives the original bytes.
+- Relevant events: `payment_intent.succeeded`, `payment_intent.processing`, and `payment_intent.payment_failed`.
+- Other verified events receive HTTP 200. Repeated events may produce repeated logs; there are no fulfillment side effects.
+- Delivery is independent of the receipt visit and can arrive before or after it.
 
-Repeated events can produce repeated logs, but there are no fulfillment side effects. A production extension would persist the order and processed event IDs, reconcile the payment state, and trigger fulfillment once. Receipt redirects would remain a customer convenience rather than a dependency for fulfilling an order.
+Locally, the [launcher](setup.md#launcher) supplies the CLI listener's signing secret. In production, Stripe would send events directly to a registered HTTPS endpoint with its own secret.
 
-## Local launcher
-
-`npm run dev` runs the Bash script in `scripts/dev.sh`. It uses the sandbox key from `.env` for CLI authentication, starts a listener on the selected local port, and injects that listener’s signing secret into the server process. It waits for a successful HTTP response before reporting readiness. Temporary logs use a private directory and are deleted on exit. The launcher stops only the processes it starts, including when either one fails. `PORT` defaults to 3000.
+Persistent orders and fulfillment are [planned extensions](../README.md#next-steps), alongside merchant tools and deployment controls.
