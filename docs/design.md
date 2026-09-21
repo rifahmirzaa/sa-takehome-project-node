@@ -4,32 +4,24 @@
 
 ## Components
 
-One Express process serves pages and payment endpoints. Stripe operations are isolated in a helper module; the [code map](../README.md#architecture) identifies each file.
+One Express process serves pages and payment endpoints. Checkout Sessions manage line items and payment state; the Payment Element stays on the shop's own page. The [code map](../README.md#architecture) identifies each file.
 
 ```mermaid
 flowchart LR
-    Buyer[Customer browser]
-    UI[Handlebars pages and browser scripts]
-    App[Express routes]
-    Catalog[lib/catalog.js]
-    Payments[lib/payments.js]
-    Element[Stripe.js Payment Element]
-    Stripe[Stripe API]
-    Buyer --> UI
-    UI --> App
-    UI --> Element
-    App --> Catalog
-    App --> Payments
-    Payments --> Stripe
-    Element --> Stripe
-    CLI[Stripe CLI local listener]
-    Stripe -->|Sandbox events| CLI
-    CLI -->|Signed webhook requests| App
+    Browser[Customer browser] --> App[Express and Handlebars]
+    App --> Catalog[Book catalog]
+    App --> Helper[Stripe helper]
+    Helper --> Sessions[Checkout Sessions API]
+    Browser --> Element[Stripe.js Checkout and Payment Element]
+    Element --> Sessions
+    Sessions --> Intent[Underlying PaymentIntent]
+    Sessions --> CLI[Stripe CLI local listener]
+    CLI -->|Signed events| App
 ```
 
-- **Server:** owns pricing and holds the secret API key.
-- **Browser:** receives the publishable key and payment client secret; session storage retains the attempt for recovery.
-- **Stripe:** collects payment details and holds payment records. The app does not store card data.
+- **Server:** owns catalog pricing and holds the secret API key.
+- **Browser:** receives the Session client secret and ID; session storage keeps the checkout attempt.
+- **Stripe:** collects payment details and holds Session and payment records. The app does not store card data.
 
 ## Purchase and confirmation
 
@@ -38,42 +30,40 @@ sequenceDiagram
     actor Customer
     participant Browser
     participant App as Express app
-    participant Stripe as Stripe API
+    participant Stripe
     Customer->>Browser: Select a book
     Browser->>App: GET /checkout?item=2
     App-->>Browser: Book summary and publishable key
-    Browser->>Browser: Save attempt ID and timestamp
-    Browser->>App: POST /create-payment-intent (book ID, attempt ID)
-    App->>App: Look up the catalog price
-    App->>Stripe: Create PaymentIntent with idempotency key
-    Stripe-->>App: PaymentIntent and client secret
-    App-->>Browser: Client secret
-    Browser->>Browser: Mount Payment Element
-    Customer->>Browser: Enter payment details and submit
-    Browser->>Stripe: stripe.confirmPayment via Stripe.js
-    opt Additional authentication required
-        Stripe-->>Browser: Authentication challenge or redirect
+    Browser->>Browser: Save attempt ID before requesting
+    Browser->>App: POST /create-checkout-session (book ID, attempt ID)
+    App->>Stripe: Create Session with catalog line item and idempotency key
+    Stripe-->>App: Session ID and client secret
+    App-->>Browser: Session ID and client secret
+    Browser->>Browser: Initialize Checkout, read total, mount Payment Element
+    Customer->>Browser: Enter email and payment details
+    Browser->>Stripe: actions.confirm with email
+    opt Bank authentication required
+        Stripe-->>Browser: Authentication challenge
         Customer->>Browser: Complete authentication
-        Browser->>Stripe: Authentication response
     end
-    alt Validation error or card decline
-        Stripe-->>Browser: Error for customer to correct
-    else Return to the app
-        Stripe-->>Browser: Redirect to /success with payment reference
-        Browser->>App: POST /payment-status (client secret)
-        App->>Stripe: Retrieve PaymentIntent
-        Stripe-->>App: Current status and amount received
-        App->>App: Check secret and integration metadata
-        App-->>Browser: Verified status, amount, currency, and intent ID
-        alt Status is succeeded
-            Browser-->>Customer: Receipt with total charged and pi_ ID
-        else Processing or incomplete
-            Browser-->>Customer: Current state and appropriate next action
+    alt Immediate validation error or decline
+        Stripe-->>Browser: Show error and allow correction
+    else Return to the shop
+        Stripe-->>Browser: Redirect to /success?session_id=cs_...
+        Browser->>App: POST /checkout-status (Session ID)
+        App->>Stripe: Retrieve Session, expand payment_intent
+        Stripe-->>App: Session and PaymentIntent state
+        App->>App: Check application metadata and payment result
+        App-->>Browser: Limited status and receipt fields
+        alt Session complete and paid, PaymentIntent succeeded
+            Browser-->>Customer: Charged amount, currency, and pi_ ID
+        else Open, expired, failed, or awaiting payment
+            Browser-->>Customer: Status and appropriate next action
         end
     end
 ```
 
-The receipt checks the client secret and `integration` metadata against a freshly retrieved intent. A redirect alone cannot confirm payment.
+The Session client secret initializes Checkout; it is not passed to `stripe.confirmPayment`. Confirmation uses Checkout's actions. The page reads the current Session total through `actions.getSession()` and updates it on Checkout's `change` event.
 
 ### Application endpoints
 
@@ -81,14 +71,14 @@ The receipt checks the client secret and `integration` metadata against a freshl
 | --- | --- |
 | `GET /` | Render the book catalog |
 | `GET /checkout?item=:id` | Validate the selection and render checkout |
-| `POST /create-payment-intent` | Accept `{ itemId, attemptId }`; use catalog pricing; return `{ clientSecret }` |
-| `POST /payment-status` | Accept `{ clientSecret }`; return verified status, received amount, currency, intent ID, book ID, and attempt ID |
-| `GET /success` | Render the receipt shell; the browser requests payment status |
-| `POST /webhook` | Verify the signature and log relevant events |
+| `POST /create-checkout-session` | Accept `{ itemId, attemptId }`; use catalog pricing; return `{ sessionId, clientSecret }` |
+| `POST /checkout-status` | Accept `{ sessionId }`; retrieve the Session and PaymentIntent; return status, received amount, currency, payment ID, book ID, and attempt ID |
+| `GET /success` | Render the receipt shell; the browser requests Session status |
+| `POST /webhook` | Verify the signature and log relevant Session events |
 
-- Status errors: **400** for malformed references, **404** for missing/mismatched records, **502** for temporary retrieval failures.
-- Payment pages use `no-store`, `no-referrer`, and a Content Security Policy. Payment API responses use `no-store`.
-- Client secrets grant access to a payment; do not log or share them. This is not customer account authentication.
+- **Receipt access:** the opaque Session ID acts as a bearer reference, checked against the application's metadata. Keep receipt links private. This demo has no customer login; it returns no email, address, or client secret from the status endpoint.
+- **Errors:** 400 for malformed references, 404 for missing/unrelated records, and 502 when status cannot be verified. A paid Session without a verified successful PaymentIntent also waits for a retry.
+- **Headers:** payment pages use `no-store`, `no-referrer`, and a Content Security Policy. Payment API responses use `no-store`.
 
 ## Retry and recovery
 
@@ -97,70 +87,75 @@ sequenceDiagram
     participant Browser
     participant Storage as Session storage
     participant App as Express app
-    participant Stripe as Stripe API
-    Browser->>Storage: Save attempt before first create request
-    Browser->>App: Create intent for attempt A
-    App->>Stripe: Create with idempotency key for A
-    Stripe-->>App: Intent created
-    Note over Browser,App: The response is lost before the browser receives it
-    Browser->>Storage: Read attempt A on retry or reload
-    Browser->>App: Retry create using attempt A
-    App->>Stripe: Repeat request with the same idempotency key
-    Stripe-->>App: Return the original result
-    App-->>Browser: Original client secret
-    Browser->>Storage: Save client secret for A
-    Note over Browser,Stripe: With a known secret, resumed checkout retrieves status instead of creating
-    Browser->>App: Check status of A
-    App->>Stripe: Retrieve original intent
-    alt Status cannot be verified
-        App-->>Browser: Retrieval error
-        Browser->>Storage: Preserve attempt A
-        Browser->>Browser: Show retry and keep Pay disabled
-    else Status verified
-        Stripe-->>App: Current intent state
-        App-->>Browser: Verified state
-        Browser->>Browser: Resume the form or open the status page
+    participant Stripe
+    Browser->>Storage: Save attempt A
+    Browser->>App: Create checkout for A
+    App->>Stripe: Create Session with key for A
+    Stripe-->>App: Session created
+    Note over Browser,App: Creation response is lost
+    Browser->>Storage: Read attempt A after reload
+    Browser->>App: Retry creation for A
+    App->>Stripe: Repeat request with the same key
+    Stripe-->>App: Original Session result
+    App-->>Browser: Original Session ID and client secret
+    Browser->>Storage: Save Session details
+    Browser->>App: Check known Session status on later reloads
+    App->>Stripe: Retrieve Session and PaymentIntent
+    alt Status unavailable
+        App-->>Browser: Error
+        Browser->>Browser: Keep saved attempt and offer retry
+    else Session open and unpaid
+        App-->>Browser: Current state
+        Browser->>Browser: Resume the existing form
+    else Session complete or expired
+        App-->>Browser: Current state
+        Browser->>Browser: Open receipt or status page
     end
 ```
 
-Creation retries reuse the attempt's idempotency key while it is under 24 hours old. Older attempts without a saved client secret stop for reconciliation; known intents remain retrievable. Clearing storage or switching devices loses the association.
+Creation retries reuse the original key while the attempt is under 24 hours old. Older attempts without a Session ID stop for reconciliation. Known Sessions are retrieved regardless of age; Stripe's confirmed expiry allows a new checkout.
 
-| Verified state | Customer action | Stored attempt |
+| Verified state | Customer experience | Stored attempt |
 | --- | --- | --- |
-| `succeeded` | View receipt | Clear matching attempt |
-| `canceled` | Return to catalog | Clear matching attempt |
-| `processing` | Check again | Preserve |
-| `requires_payment_method` | Correct details and retry | Reuse |
-| `requires_action` / `requires_confirmation` | Return to checkout | Reuse |
-| Other state or retrieval error | Follow status message or retry check | Preserve |
+| Complete, paid, successful PaymentIntent | Receipt with amount and `pi_` ID | Clear matching Session and attempt |
+| Expired | Select the book again | Clear matching Session and attempt |
+| Complete, unpaid, payment failed | Start a new checkout | Clear matching Session and attempt |
+| Complete, payment still pending | Check again | Preserve |
+| Open and unpaid | Return to checkout | Reuse |
+| Retrieval error | Retry the status check | Preserve |
 
-Pay stays disabled until the Element is ready and while confirmation is in progress. An old receipt cannot clear a newer attempt.
+Pay waits for the Element to be ready and is disabled during confirmation. Initialization retries destroy the previous Element; callbacks from older instances cannot enable the new form.
+
+Records from the previous direct-PaymentIntent integration are preserved and flagged for review, not silently replaced. Clearing storage or switching devices loses the association; persistent orders are needed for recovery across devices.
 
 ## Webhook delivery
 
 ```mermaid
 sequenceDiagram
     participant Stripe
-    participant CLI as Stripe CLI (local development)
+    participant CLI as Stripe CLI
     participant App as POST /webhook
     participant SDK as Stripe SDK
-    Stripe->>CLI: PaymentIntent event
-    CLI->>App: Forward body and Stripe-Signature
-    App->>SDK: constructEvent(raw body, signature, signing secret)
-    alt Invalid or missing signature
+    Stripe->>CLI: Checkout Session event
+    CLI->>App: Original body and Stripe-Signature
+    App->>SDK: constructEvent with listener signing secret
+    alt Missing or invalid signature
         App-->>CLI: HTTP 400
     else Verified event
         SDK-->>App: Parsed event
-        App->>App: Log event ID, intent ID, and status when relevant
+        App->>App: Check application metadata
+        App->>App: Log event, Session, payment status, and intent ID
         App-->>CLI: HTTP 200
     end
 ```
 
-- The raw-body route runs before Express's JSON parser so signature verification receives the original bytes.
-- Relevant events: `payment_intent.succeeded`, `payment_intent.processing`, and `payment_intent.payment_failed`.
-- Other verified events receive HTTP 200. Repeated events may produce repeated logs; there are no fulfillment side effects.
-- Delivery is independent of the receipt visit and can arrive before or after it.
+The raw-body route runs before the JSON parser. The handler observes:
 
-Locally, the [launcher](setup.md#launcher) supplies the CLI listener's signing secret. In production, Stripe would send events directly to a registered HTTPS endpoint with its own secret.
+- `checkout.session.completed`: checkout completed; payment may still be unpaid
+- `checkout.session.async_payment_succeeded`: a delayed payment succeeded
+- `checkout.session.async_payment_failed`: a delayed payment failed
+- `checkout.session.expired`: an unpaid checkout expired
 
-Persistent orders and fulfillment are [planned extensions](../README.md#next-steps), alongside merchant tools and deployment controls.
+Other verified events are acknowledged. Repeated events may produce repeated logs; there are no fulfillment side effects. When fulfillment is added, both completion and delayed-success events must check payment status and update a persistent order idempotently.
+
+Delivery is independent of the receipt visit. The [launcher](setup.md#launcher) supplies the local listener's signing secret. In production, Stripe would send events directly to a registered HTTPS endpoint with its own secret.

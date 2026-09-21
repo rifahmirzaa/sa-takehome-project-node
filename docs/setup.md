@@ -34,7 +34,7 @@ Extract the ZIP and open a terminal in the project folder containing `package.js
 | `STRIPE_PUBLISHABLE_KEY` | Publishable key from the same sandbox; used by Stripe.js |
 | `STRIPE_WEBHOOK_SECRET` | Leave blank for the launcher; set the active listener's `whsec_…` value for manual startup |
 
-- Use a restricted sandbox key (`rk_test_…`) with permission for account retrieval, PaymentIntent creation/retrieval, and CLI listening, or a sandbox secret key (`sk_test_…`).
+- Use a restricted sandbox key (`rk_test_…`) with permission for account retrieval, Checkout Session creation/retrieval and expanded PaymentIntent retrieval, and CLI listening, or a sandbox secret key (`sk_test_…`).
 - Keep `.env` private and exclude it from any ZIP you share. Restart after changing keys.
 - The launcher rejects live keys and checks server-key access. It cannot prove that the publishable key belongs to the same sandbox.
 
@@ -48,7 +48,7 @@ bash scripts/dev.sh
 - `--check` installs missing npm dependencies and verifies sandbox API access without starting processes.
 - Normal startup waits for the listener, passes its signing secret to the app, and prints `Ready: http://localhost:3000`.
 - No separate `stripe login` is needed: both processes use the server key from `.env`.
-- **Ctrl+C** stops both processes. The script preserves `.env` and deletes its temporary logs.
+- **Ctrl+C** stops the server and listener, including child processes started by npm-installed CLI wrappers. The script preserves `.env` and deletes its temporary logs.
 - `npm run dev` is equivalent. Using `bash scripts/dev.sh` also works if ZIP extraction removes the script's executable permission.
 
 To use another port:
@@ -66,7 +66,7 @@ Use this instead of the launcher when you want to manage the two processes yours
 
    ```bash
    stripe login
-   stripe listen --events payment_intent.succeeded,payment_intent.processing,payment_intent.payment_failed --forward-to localhost:3000/webhook
+   stripe listen --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired --forward-to localhost:3000/webhook
    ```
 
 3. Copy the listener's `whsec_…` into `.env` as `STRIPE_WEBHOOK_SECRET`.
@@ -79,7 +79,9 @@ Keep both terminals open. Restart the app after changing `.env`. The CLI signing
 Follow the [test-card walkthrough](../README.md#test-the-payment-flow). Confirm both paths:
 
 - **Receipt:** amount, currency, and `pi_` ID match the sandbox Dashboard.
-- **Webhook:** a verified payment event appears in the app terminal; manual CLI forwarding shows HTTP 200.
+- **Webhook:** a verified `checkout.session.completed` event with payment status `paid` appears in the app terminal; manual CLI forwarding shows HTTP 200.
+
+To check expiry, expire an unpaid Session in Stripe and reload checkout. The page should show “Checkout expired”; selecting the book again starts a new Session.
 
 Receipt retrieval and webhook delivery are independent. A working receipt alone does not confirm webhook delivery.
 
@@ -92,6 +94,7 @@ Receipt retrieval and webhook delivery are independent. A working receipt alone 
 | Checkout is unavailable | Set both API keys and restart |
 | Payment Element does not load | Check matching sandbox keys, network access, and browser blockers; retry initialization |
 | Payment status is unavailable | Retry the status check; preserve the saved attempt |
+| Previous integration warning | This tab retains a direct-PaymentIntent checkout. Verify it in Stripe before clearing that saved attempt; it is never silently replaced |
 | Checkout is too old to retry | Inspect Stripe logs and `bookId`/`attemptId` metadata before resetting the attempt |
 | Webhook returns 400 | Use the active listener's signing secret and restart the app |
 | Port 3000 is occupied | Stop the previous app or use `PORT=3001 bash scripts/dev.sh` |
