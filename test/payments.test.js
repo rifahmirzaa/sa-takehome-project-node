@@ -1,376 +1,195 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-
+const Stripe = require('stripe');
 const app = require('../app');
 const payments = require('../lib/payments');
 
-// Helper to start the Express app on a dynamic ephemeral port
-function startServer() {
-  return new Promise((resolve) => {
-    const server = http.createServer(app);
-    server.listen(0, () => {
-      const port = server.address().port;
-      const baseUrl = `http://localhost:${port}`;
-      resolve({
-        server,
-        baseUrl,
-        close: () => new Promise((res) => server.close(res))
-      });
-    });
+const attemptId = '550e8400-e29b-41d4-a716-446655440000';
+const sessionId = 'cs_test_book1';
+const metadata = { integration: payments.INTEGRATION, bookId: '1', attemptId };
+const intent = { id: 'pi_book1', status: 'succeeded', amount_received: 2300, currency: 'usd' };
+const session = { id: sessionId, mode: 'payment', status: 'complete', payment_status: 'paid',
+  metadata, currency: 'usd', payment_intent: intent };
+
+async function server(t, client = {}) {
+  const previous = { secret: process.env.STRIPE_SECRET_KEY, publishable: process.env.STRIPE_PUBLISHABLE_KEY,
+    webhook: process.env.STRIPE_WEBHOOK_SECRET };
+  process.env.STRIPE_SECRET_KEY = 'sk_test_fixture';
+  process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_fixture';
+  process.env.STRIPE_WEBHOOK_SECRET = 'whsec_fixture';
+  payments.setStripeClientForTest(client);
+  const listener = http.createServer(app);
+  await new Promise(resolve => listener.listen(0, resolve));
+  t.after(async () => {
+    await new Promise(resolve => listener.close(resolve));
+    payments.setStripeClientForTest(null);
+    for (const [name, value] of Object.entries({ STRIPE_SECRET_KEY: previous.secret,
+      STRIPE_PUBLISHABLE_KEY: previous.publishable, STRIPE_WEBHOOK_SECRET: previous.webhook })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
+  const base = `http://localhost:${listener.address().port}`;
+  return {
+    base,
+    post: (url, body) => fetch(base + url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    })
+  };
 }
 
-test('GET /checkout security headers and catalog resolution', async () => {
-  const { baseUrl, close } = await startServer();
-  try {
-    const res = await fetch(`${baseUrl}/checkout?item=1`);
+test('checkout resolves catalog prices and provides payment security headers', async t => {
+  const { base } = await server(t);
+  for (const path of ['/checkout?item=1', '/success']) {
+    const res = await fetch(base + path);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('cache-control'), 'no-store');
     assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
     assert.match(res.headers.get('content-security-policy'), /js\.stripe\.com/);
-  } finally {
-    await close();
   }
+  const html = await (await fetch(base + '/checkout?item=1')).text();
+  assert.match(html, /\$23\.00/);
+  assert.match(html, /checkout-email/);
+  assert.match(html, /js\.stripe\.com\/dahlia\/stripe.js/);
+  assert.equal((await fetch(base + '/checkout?item=999')).status, 404);
+  assert.equal((await fetch(base + '/checkout?item=1&item=2')).status, 400);
 });
 
-test('POST /create-payment-intent rejects when unconfigured or inputs are invalid', async () => {
-  const { baseUrl, close } = await startServer();
-  const prevSecretKey = process.env.STRIPE_SECRET_KEY;
-  const prevPubKey = process.env.STRIPE_PUBLISHABLE_KEY;
-
-  try {
-    // Unconfigured returns 503
-    delete process.env.STRIPE_SECRET_KEY;
-    delete process.env.STRIPE_PUBLISHABLE_KEY;
-    const resUnconfigured = await fetch(`${baseUrl}/create-payment-intent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ itemId: '1', attemptId: '550e8400-e29b-41d4-a716-446655440000' })
-    });
-    assert.equal(resUnconfigured.status, 503);
-
-    // When configured, invalid inputs return 400
-    process.env.STRIPE_SECRET_KEY = 'sk_test_fake';
-    process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_fake';
-
-    // Missing itemId
-    const res1 = await fetch(`${baseUrl}/create-payment-intent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ attemptId: '550e8400-e29b-41d4-a716-446655440000' })
-    });
-    assert.equal(res1.status, 400);
-
-    // Invalid catalog ID
-    const res2 = await fetch(`${baseUrl}/create-payment-intent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ itemId: '999', attemptId: '550e8400-e29b-41d4-a716-446655440000' })
-    });
-    assert.equal(res2.status, 400);
-
-    // Non-UUID attempt ID
-    const res3 = await fetch(`${baseUrl}/create-payment-intent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ itemId: '1', attemptId: 'not-a-uuid' })
-    });
-    assert.equal(res3.status, 400);
-  } finally {
-    process.env.STRIPE_SECRET_KEY = prevSecretKey;
-    process.env.STRIPE_PUBLISHABLE_KEY = prevPubKey;
-    await close();
+test('session creation rejects incomplete configuration and invalid selections or attempts', async t => {
+  const { post, base } = await server(t);
+  for (const body of [{}, { itemId: '999', attemptId }, { itemId: 1, attemptId },
+    { itemId: '1', attemptId: 'invalid' }]) {
+    assert.equal((await post('/create-checkout-session', body)).status, 400);
   }
+  delete process.env.STRIPE_PUBLISHABLE_KEY;
+  assert.equal((await post('/create-checkout-session', { itemId: '1', attemptId })).status, 503);
+  assert.match(await (await fetch(base + '/checkout?item=1')).text(), /configuration is incomplete/);
 });
 
-test('POST /create-payment-intent enforces catalog prices and returns client secret', async () => {
-  let createdParams = null;
-  let idempotencyHeader = null;
-
-  const mockClient = {
-    paymentIntents: {
-      create: async (params, options) => {
-        createdParams = params;
-        idempotencyHeader = options && options.idempotencyKey;
-        return { client_secret: 'pi_test123_secret_xyz456' };
-      }
+test('session creation uses catalog line items, stable retries, and metadata on Session and PaymentIntent', async t => {
+  const calls = [];
+  const { post, base } = await server(t, { checkout: { sessions: {
+    create: async (params, options) => {
+      calls.push({ params, options });
+      return { id: sessionId, client_secret: 'cs_test_book1_secret_fixture' };
     }
-  };
+  } } });
+  for (let i = 0; i < 2; i++) {
+    const res = await post('/create-checkout-session', { itemId: '1', attemptId, amount: 1,
+      currency: 'jpy', returnUrl: 'https://untrusted.example', quantity: 99 });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await res.json(), { sessionId, clientSecret: 'cs_test_book1_secret_fixture' });
+  }
+  const { params, options } = calls[0];
+  assert.deepEqual(calls[0], calls[1]);
+  assert.equal(params.mode, 'payment');
+  assert.equal(params.ui_mode, 'elements');
+  assert.equal(params.line_items[0].price_data.unit_amount, 2300);
+  assert.equal(params.line_items[0].price_data.currency, 'usd');
+  assert.match(params.line_items[0].price_data.product_data.name, /Science and Engineering/);
+  assert.equal(params.line_items[0].quantity, 1);
+  assert.deepEqual(params.metadata, metadata);
+  assert.deepEqual(params.payment_intent_data.metadata, metadata);
+  assert.equal(params.return_url, base + '/success?session_id={CHECKOUT_SESSION_ID}');
+  assert.equal(params.payment_method_types, undefined);
+  assert.equal(params.adaptive_pricing.enabled, false);
+  assert.match(params.integration_identifier, /^book-nook-[a-z]{8}$/);
+  assert.match(options.idempotencyKey, new RegExp(attemptId));
+  await post('/create-checkout-session', { itemId: '2', attemptId });
+  assert.notEqual(calls[2].options.idempotencyKey, options.idempotencyKey);
+});
 
-  payments.setStripeClientForTest(mockClient);
+test('creation errors do not expose Stripe credentials or raw error details', async t => {
+  const { post } = await server(t, { checkout: { sessions: {
+    create: async () => { throw new Error('sk_test_private fixture failure'); }
+  } } });
+  const res = await post('/create-checkout-session', { itemId: '1', attemptId });
+  assert.equal(res.status, 500);
+  assert.deepEqual(await res.json(), { error: 'Unable to initialize payment' });
+});
 
-  const prevSecretKey = process.env.STRIPE_SECRET_KEY;
-  const prevPubKey = process.env.STRIPE_PUBLISHABLE_KEY;
-  process.env.STRIPE_SECRET_KEY = 'sk_test_fake';
-  process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_fake';
+test('receipt retrieves the session with its payment and returns only verified display fields', async t => {
+  const { post } = await server(t, { checkout: { sessions: { retrieve: async (id, options) => {
+    assert.equal(id, sessionId);
+    assert.deepEqual(options, { expand: ['payment_intent'] });
+    return { ...session, client_secret: 'private', customer_details: { email: 'private@example.com' } };
+  } } } });
+  const res = await post('/checkout-status', { sessionId });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await res.json(), { sessionId, status: 'complete', paymentStatus: 'paid',
+    paymentIntentStatus: 'succeeded', id: 'pi_book1', amountReceived: 2300, currency: 'usd', bookId: '1', attemptId });
+});
 
-  const { baseUrl, close } = await startServer();
-  try {
-    const res = await fetch(`${baseUrl}/create-payment-intent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        itemId: '1',
-        attemptId: '550e8400-e29b-41d4-a716-446655440000',
-        amount: 1, // client attempts to override price
-        currency: 'jpy' // client attempts to override currency
-      })
-    });
+test('receipt rejects malformed, unrelated, and non-payment session references', async t => {
+  let record = session;
+  const { post } = await server(t, { checkout: { sessions: { retrieve: async () => record } } });
+  for (const value of [null, '', 'pi_old', ['cs_test_book1'], 'cs_test_x?expand=customer']) {
+    assert.equal((await post('/checkout-status', { sessionId: value })).status, 400);
+  }
+  for (const other of [{ ...session, metadata: {} }, { ...session, mode: 'subscription' }, null]) {
+    record = other;
+    assert.equal((await post('/checkout-status', { sessionId })).status, 404);
+  }
+});
 
+test('paid receipt waits for a verified successful underlying PaymentIntent', async t => {
+  let record = session;
+  const { post } = await server(t, { checkout: { sessions: { retrieve: async () => record } } });
+  for (const payment_intent of [null, 'pi_unexpanded', { ...intent, status: 'processing' }]) {
+    record = { ...session, payment_intent };
+    assert.equal((await post('/checkout-status', { sessionId })).status, 502);
+  }
+});
+
+test('open, expired, and delayed sessions never claim successful payment', async t => {
+  let record;
+  const { post } = await server(t, { checkout: { sessions: { retrieve: async () => record } } });
+  for (const state of ['open', 'expired', 'complete']) {
+    record = { ...session, status: state, payment_status: 'unpaid', payment_intent: null };
+    const res = await post('/checkout-status', { sessionId });
     assert.equal(res.status, 200);
     const data = await res.json();
-    assert.equal(data.clientSecret, 'pi_test123_secret_xyz456');
-
-    // Verify catalog values were used, ignoring client attempts
-    assert.equal(createdParams.amount, 2300);
-    assert.equal(createdParams.currency, 'usd');
-    assert.equal(createdParams.capture_method, 'automatic');
-    assert.equal(createdParams.metadata.bookId, '1');
-    assert.equal(createdParams.metadata.attemptId, '550e8400-e29b-41d4-a716-446655440000');
-    assert.equal(idempotencyHeader, 'demo-book-1-attempt-550e8400-e29b-41d4-a716-446655440000');
-  } finally {
-    process.env.STRIPE_SECRET_KEY = prevSecretKey;
-    process.env.STRIPE_PUBLISHABLE_KEY = prevPubKey;
-    payments.setStripeClientForTest(null);
-    await close();
+    assert.equal(data.status, state);
+    assert.equal(data.paymentStatus, 'unpaid');
+    assert.equal(data.amountReceived, null);
   }
 });
 
-test('POST /payment-status validates secret and returns verified status', async () => {
-  const mockClient = {
-    paymentIntents: {
-      retrieve: async (id) => {
-        if (id === 'pi_success123') {
-          return {
-            id: 'pi_success123',
-            client_secret: 'pi_success123_secret_valid',
-            status: 'succeeded',
-            amount_received: 2300,
-            currency: 'usd',
-            metadata: {
-              integration: 'sa-takehome-demo',
-              bookId: '1',
-              attemptId: '550e8400-e29b-41d4-a716-446655440000'
-            }
-          };
-        }
-        if (id === 'pi_unrelated') {
-          return {
-            id: 'pi_unrelated',
-            client_secret: 'pi_unrelated_secret_valid',
-            status: 'succeeded',
-            amount_received: 5000,
-            currency: 'usd',
-            metadata: {}
-          };
-        }
-        throw new Error('Not found');
-      }
-    }
-  };
-
-  payments.setStripeClientForTest(mockClient);
-
-  const { baseUrl, close } = await startServer();
-  try {
-    // Malformed client secret
-    const res1 = await fetch(`${baseUrl}/payment-status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret: 'invalid_secret' })
-    });
-    assert.equal(res1.status, 400);
-
-    // Mismatched or non-demo intent
-    const res2 = await fetch(`${baseUrl}/payment-status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret: 'pi_unrelated_secret_valid' })
-    });
-    assert.equal(res2.status, 404);
-
-    // Verified intent
-    const res3 = await fetch(`${baseUrl}/payment-status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret: 'pi_success123_secret_valid' })
-    });
-    assert.equal(res3.status, 200);
-    const data = await res3.json();
-    assert.equal(data.id, 'pi_success123');
-    assert.equal(data.status, 'succeeded');
-    assert.equal(data.amountReceived, 2300);
-    assert.equal(data.currency, 'usd');
-    assert.equal(data.bookId, '1');
-    assert.equal(data.attemptId, '550e8400-e29b-41d4-a716-446655440000');
-    // Ensure sensitive fields are not returned
-    assert.equal(data.clientSecret, undefined);
-    assert.equal(data.customer, undefined);
-  } finally {
-    payments.setStripeClientForTest(null);
-    await close();
-  }
+test('missing sessions return 404 while temporary retrieval failures return 502', async t => {
+  let missing = true;
+  const { post } = await server(t, { checkout: { sessions: { retrieve: async () => {
+    throw missing ? { code: 'resource_missing' } : new Error('Temporary connection failure');
+  } } } });
+  assert.equal((await post('/checkout-status', { sessionId })).status, 404);
+  missing = false;
+  assert.equal((await post('/checkout-status', { sessionId })).status, 502);
 });
 
-test('POST /webhook verifies signature and handles events safely', async () => {
-  let webhookPayload = null;
-  let webhookSig = null;
-
-  const mockClient = {
-    webhooks: {
-      constructEvent: (payload, signature, secret) => {
-        webhookPayload = payload;
-        webhookSig = signature;
-        if (signature === 'valid_signature') {
-          return {
-            id: 'evt_test123',
-            type: 'payment_intent.succeeded',
-            data: {
-              object: {
-                id: 'pi_test123',
-                status: 'succeeded'
-              }
-            }
-          };
-        }
-        throw new Error('Invalid signature');
-      }
-    }
-  };
-
-  payments.setStripeClientForTest(mockClient);
-  const prevWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_secret';
-
-  const { baseUrl, close } = await startServer();
-  try {
-    // Missing signature
-    const res1 = await fetch(`${baseUrl}/webhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'payment_intent.succeeded' })
-    });
-    assert.equal(res1.status, 400);
-
-    // Invalid signature
-    const res2 = await fetch(`${baseUrl}/webhook`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Stripe-Signature': 'invalid_signature'
-      },
-      body: JSON.stringify({ type: 'payment_intent.succeeded' })
-    });
-    assert.equal(res2.status, 400);
-
-    // Valid signature
-    const res3 = await fetch(`${baseUrl}/webhook`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Stripe-Signature': 'valid_signature'
-      },
-      body: JSON.stringify({ type: 'payment_intent.succeeded' })
-    });
-    assert.equal(res3.status, 200);
-    const data = await res3.json();
-    assert.equal(data.received, true);
-    assert.ok(Buffer.isBuffer(webhookPayload));
-  } finally {
-    process.env.STRIPE_WEBHOOK_SECRET = prevWebhookSecret;
-    payments.setStripeClientForTest(null);
-    await close();
+test('webhook verifies raw signatures and observes paid, unpaid, failed, and expired session events', async t => {
+  const stripe = new Stripe('sk_test_fixture');
+  const { base } = await server(t, { webhooks: stripe.webhooks });
+  const logs = [];
+  const originalLog = console.log;
+  console.log = message => logs.push(message);
+  t.after(() => { console.log = originalLog; });
+  const send = (payload, signature) => fetch(base + '/webhook', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(signature ? { 'Stripe-Signature': signature } : {}) }, body: payload });
+  for (const [type, payment_status] of [['checkout.session.completed', 'paid'],
+    ['checkout.session.completed', 'unpaid'], ['checkout.session.async_payment_succeeded', 'paid'],
+    ['checkout.session.async_payment_failed', 'unpaid'], ['checkout.session.expired', 'unpaid']]) {
+    const payload = JSON.stringify({ id: 'evt_fixture', type, data: { object: { ...session, payment_status } } });
+    const signature = stripe.webhooks.generateTestHeaderString({ payload, secret: 'whsec_fixture' });
+    assert.equal((await send(payload, signature)).status, 200);
+    assert.match(logs.at(-1), new RegExp(type.replaceAll('.', '\\.')));
+    assert.match(logs.at(-1), new RegExp('payment ' + payment_status));
+    assert.equal((await send(payload + ' ', signature)).status, 400);
+    assert.equal((await send(payload)).status, 400);
   }
-});
-
-test('GET /success security headers', async () => {
-  const { baseUrl, close } = await startServer();
-  try {
-    const res = await fetch(`${baseUrl}/success`);
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('cache-control'), 'no-store');
-    assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
-    assert.match(res.headers.get('content-security-policy'), /js\.stripe\.com/);
-  } finally {
-    await close();
-  }
-});
-
-test('GET /checkout handles unconfigured Stripe without crashing', async () => {
-  const prevSecretKey = process.env.STRIPE_SECRET_KEY;
-  const prevPubKey = process.env.STRIPE_PUBLISHABLE_KEY;
-  delete process.env.STRIPE_SECRET_KEY;
-  delete process.env.STRIPE_PUBLISHABLE_KEY;
-
-  const { baseUrl, close } = await startServer();
-  try {
-    const res = await fetch(`${baseUrl}/checkout?item=1`);
-    assert.equal(res.status, 200);
-    const html = await res.text();
-    assert.match(html, /Payment processing is temporarily unavailable/);
-  } finally {
-    process.env.STRIPE_SECRET_KEY = prevSecretKey;
-    process.env.STRIPE_PUBLISHABLE_KEY = prevPubKey;
-    await close();
-  }
-});
-
-test('payments helper functions validate and parse client secrets', () => {
-  assert.equal(payments.isValidClientSecret('pi_3UHO4dICrHVTMrD0_secret_abc123'), true);
-  assert.equal(payments.isValidClientSecret('seti_123_secret_abc'), false);
-  assert.equal(payments.isValidClientSecret('pi_123'), false);
-  assert.equal(payments.isValidClientSecret(null), false);
-
-  assert.equal(payments.extractPaymentIntentId('pi_3UHO4dICrHVTMrD0_secret_abc123'), 'pi_3UHO4dICrHVTMrD0');
-  assert.equal(payments.extractPaymentIntentId('invalid'), null);
-});
-
-test('POST /payment-status returns 404 for nonexistent PaymentIntent and 502 for temporary failure', async () => {
-  const mockClient = {
-    paymentIntents: {
-      retrieve: async (id) => {
-        if (id === 'pi_nonexistent123') {
-          const notFoundError = new Error('No such payment_intent: pi_nonexistent123');
-          notFoundError.statusCode = 404;
-          notFoundError.code = 'resource_missing';
-          throw notFoundError;
-        }
-        if (id === 'pi_temporaryerror123') {
-          const serverError = new Error('Upstream timeout');
-          serverError.statusCode = 500;
-          throw serverError;
-        }
-        throw new Error('Unexpected');
-      }
-    }
-  };
-
-  payments.setStripeClientForTest(mockClient);
-
-  const { baseUrl, close } = await startServer();
-  try {
-    // Nonexistent PaymentIntent maps to 404
-    const resNotFound = await fetch(`${baseUrl}/payment-status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret: 'pi_nonexistent123_secret_abc' })
-    });
-    assert.equal(resNotFound.status, 404);
-    const dataNotFound = await resNotFound.json();
-    assert.equal(dataNotFound.error, 'Payment record not found');
-
-    // Temporary upstream error maps to 502
-    const resTemp = await fetch(`${baseUrl}/payment-status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientSecret: 'pi_temporaryerror123_secret_abc' })
-    });
-    assert.equal(resTemp.status, 502);
-    const dataTemp = await resTemp.json();
-    assert.equal(dataTemp.error, 'Payment status temporarily unavailable');
-  } finally {
-    payments.setStripeClientForTest(null);
-    await close();
-  }
+  const ignored = JSON.stringify({ id: 'evt_other', type: 'checkout.session.completed', data: { object: { ...session, metadata: {} } } });
+  const signature = stripe.webhooks.generateTestHeaderString({ payload: ignored, secret: 'whsec_fixture' });
+  assert.equal((await send(ignored, signature)).status, 200);
+  assert.equal(logs.length, 5);
 });

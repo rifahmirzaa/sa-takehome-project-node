@@ -31,14 +31,17 @@ app.post('/webhook', express.raw({ type: 'application/json' }), function(req, re
     return res.status(400).send('Webhook signature verification failed');
   }
 
-  // Event observation only; no fulfillment side effects in this demo
+  // Observe session events without triggering fulfillment
   switch (event.type) {
-    case 'payment_intent.succeeded':
-    case 'payment_intent.processing':
-    case 'payment_intent.payment_failed': {
-      const intent = event.data && event.data.object;
-      if (intent) {
-        console.log(`Payment event ${event.id}: intent ${intent.id} status is ${intent.status}`);
+    case 'checkout.session.completed':
+    case 'checkout.session.async_payment_succeeded':
+    case 'checkout.session.async_payment_failed':
+    case 'checkout.session.expired': {
+      const session = event.data && event.data.object;
+      if (session && session.metadata?.integration === payments.INTEGRATION) {
+        const intentId = typeof session.payment_intent === 'string'
+          ? session.payment_intent : session.payment_intent?.id;
+        console.log(`Checkout event ${event.id}: ${event.type}, session ${session.id}, payment ${session.payment_status}, intent ${intentId || 'none'}`);
       }
       break;
     }
@@ -128,9 +131,9 @@ app.get('/checkout', function(req, res) {
 });
 
 /**
- * Create PaymentIntent endpoint
+ * Create Checkout Session endpoint
  */
-app.post('/create-payment-intent', async function(req, res) {
+app.post('/create-checkout-session', async function(req, res) {
   res.set('Cache-Control', 'no-store');
 
   if (!payments.isConfigured()) {
@@ -153,8 +156,9 @@ app.post('/create-payment-intent', async function(req, res) {
   }
 
   try {
-    const clientSecret = await payments.createPaymentIntent({ book, attemptId });
-    return res.status(200).json({ clientSecret });
+    const returnUrl = `${req.protocol}://${req.get('host')}/success?session_id={CHECKOUT_SESSION_ID}`;
+    const session = await payments.createCheckoutSession({ book, attemptId, returnUrl });
+    return res.status(200).json(session);
   } catch (err) {
     return res.status(500).json({ error: 'Unable to initialize payment' });
   }
@@ -163,37 +167,41 @@ app.post('/create-payment-intent', async function(req, res) {
 /**
  * Verified payment status endpoint
  */
-app.post('/payment-status', async function(req, res) {
+app.post('/checkout-status', async function(req, res) {
   res.set('Cache-Control', 'no-store');
+  const { sessionId } = req.body || {};
 
-  const { clientSecret } = req.body || {};
-
-  if (!payments.isValidClientSecret(clientSecret)) {
-    return res.status(400).json({ error: 'Invalid payment reference' });
+  if (!payments.isValidSessionId(sessionId)) {
+    return res.status(400).json({ error: 'Invalid checkout reference' });
   }
 
-  const intentId = payments.extractPaymentIntentId(clientSecret);
-
   try {
-    const intent = await payments.retrievePaymentIntent(intentId);
+    const session = await payments.retrieveCheckoutSession(sessionId);
+    if (!session || session.mode !== 'payment' || session.metadata?.integration !== payments.INTEGRATION) {
+      return res.status(404).json({ error: 'Checkout record not found' });
+    }
+    const intent = session.payment_intent;
+    const expandedIntent = intent && typeof intent === 'object' ? intent : null;
 
-    // Verify secret possession and application metadata match the retrieved record
-    if (!intent || intent.client_secret !== clientSecret || intent.metadata?.integration !== 'sa-takehome-demo') {
-      return res.status(404).json({ error: 'Payment record not found' });
+    // Paid sessions need their underlying payment verified before showing a receipt
+    if (session.payment_status === 'paid' && (!expandedIntent || expandedIntent.status !== 'succeeded')) {
+      return res.status(502).json({ error: 'Payment status temporarily unavailable' });
     }
 
     return res.status(200).json({
-      id: intent.id,
-      status: intent.status,
-      amountReceived: intent.amount_received,
-      currency: intent.currency,
-      bookId: intent.metadata?.bookId || null,
-      attemptId: intent.metadata?.attemptId || null
+      sessionId: session.id,
+      status: session.status,
+      paymentStatus: session.payment_status,
+      paymentIntentStatus: expandedIntent?.status || null,
+      id: expandedIntent?.id || null,
+      amountReceived: expandedIntent?.amount_received ?? null,
+      currency: expandedIntent?.currency || session.currency,
+      bookId: session.metadata.bookId || null,
+      attemptId: session.metadata.attemptId || null
     });
   } catch (err) {
-    // Nonexistent payment intents return 404; transient failures return 502
     if (err.statusCode === 404 || err.code === 'resource_missing') {
-      return res.status(404).json({ error: 'Payment record not found' });
+      return res.status(404).json({ error: 'Checkout record not found' });
     }
     return res.status(502).json({ error: 'Payment status temporarily unavailable' });
   }

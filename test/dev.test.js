@@ -22,7 +22,7 @@ async function freePort() {
   return port;
 }
 
-async function fixture(t, { missingEnv = false, secretKey = fixtureKey, failAuth = false, failListener = false, port } = {}) {
+async function fixture(t, { missingEnv = false, secretKey = fixtureKey, failAuth = false, failListener = false, wrappedListener = false, port } = {}) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'bookshop-launcher-'));
   const project = path.join(temporary, 'project');
   fs.mkdirSync(project);
@@ -42,13 +42,17 @@ const fs = require('node:fs');
 const args = process.argv.slice(2);
 const record = data => fs.appendFileSync(process.env.LAUNCHER_TRACE, JSON.stringify(data) + '\\n');
 if (process.env.STRIPE_API_KEY !== '${fixtureKey}') process.exit(2);
-record({ command: args[0], pid: process.pid });
+record({ command: process.env.LISTENER_CHILD === '1' ? 'listener-child' : args[0], args, pid: process.pid });
 if (args[0] === 'whoami') { console.log('{}'); process.exit(0); }
 if (args[0] === 'get') {
   if (process.env.FAIL_AUTH === '1') { console.error('${fixtureKey} authentication failed'); process.exit(1); }
   console.log('{}'); process.exit(0);
 }
-if (args[0] === 'listen') {
+if (args[0] === 'listen' && process.env.WRAPPED_LISTENER === '1' && process.env.LISTENER_CHILD !== '1') {
+  const { spawn } = require('node:child_process');
+  const child = spawn(process.execPath, [__filename, ...args], { stdio: 'inherit', env: { ...process.env, LISTENER_CHILD: '1' } });
+  child.on('exit', code => process.exit(code || 0));
+} else if (args[0] === 'listen') {
   if (process.env.FAIL_LISTENER === '1') { console.error('${fixtureKey} listener failed'); process.exit(1); }
   console.log('Ready! Your webhook signing secret is ${fixtureSecret}');
   process.on('SIGTERM', () => { record({ command: 'stopped', pid: process.pid }); process.exit(0); });
@@ -65,6 +69,13 @@ if (args[0] === 'listen') {
         await stopped;
       }
     }
+    if (fs.existsSync(trace)) {
+      for (const event of fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse)) {
+        if (event.command === 'listener-child') {
+          try { process.kill(event.pid, 'SIGTERM'); } catch {}
+        }
+      }
+    }
     fs.rmSync(temporary, { recursive: true, force: true });
   });
   function run(args = []) {
@@ -73,7 +84,8 @@ if (args[0] === 'listen') {
       env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH,
         NODE_PATH: path.join(root, 'node_modules'), TMPDIR: tmp,
         PORT: String(selectedPort), LAUNCHER_TRACE: trace,
-        FAIL_AUTH: failAuth ? '1' : '0', FAIL_LISTENER: failListener ? '1' : '0' },
+        FAIL_AUTH: failAuth ? '1' : '0', FAIL_LISTENER: failListener ? '1' : '0',
+        WRAPPED_LISTENER: wrappedListener ? '1' : '0' },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     children.push(child);
@@ -168,7 +180,7 @@ bashTest('launcher forwards with an ephemeral secret and cleans up both processe
   assert.equal((await fetch(`http://localhost:${f.port}/`)).status, 200);
   const Stripe = require('stripe');
   const stripe = new Stripe(fixtureKey);
-  const payload = JSON.stringify({ id: 'evt_launcher', type: 'payment_intent.succeeded', data: { object: { id: 'pi_launcher', status: 'succeeded' } } });
+  const payload = JSON.stringify({ id: 'evt_launcher', type: 'checkout.session.completed', data: { object: { id: 'cs_test_launcher', payment_status: 'paid', payment_intent: 'pi_launcher', metadata: { integration: 'book-nook' } } } });
   const signature = stripe.webhooks.generateTestHeaderString({ payload, secret: fixtureSecret });
   const webhook = await fetch(`http://localhost:${f.port}/webhook`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature }, body: payload
@@ -178,9 +190,24 @@ bashTest('launcher forwards with an ephemeral secret and cleans up both processe
   const result = await run.finished;
   assert.equal(result.code, 143);
   const listener = f.events().find(e => e.command === 'listen');
+  assert.equal(listener.args[listener.args.indexOf('--events') + 1], 'checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired');
+  assert.match(result.output, /Checkout event evt_launcher/);
   assert.throws(() => process.kill(listener.pid, 0), { code: 'ESRCH' });
   await assert.rejects(fetch(`http://localhost:${f.port}/`));
   assert.equal(fs.readFileSync(f.envPath, 'utf8'), f.envText);
   assert.deepEqual(fs.readdirSync(f.tmp), []);
   noSecrets(result.output);
+});
+
+
+bashTest('launcher also stops the native listener started by a CLI wrapper', async t => {
+  const f = await fixture(t, { wrappedListener: true });
+  const run = f.run();
+  await until(() => run.output().includes('Ready: http://localhost:'));
+  const nativeListener = f.events().find(e => e.command === 'listener-child');
+  assert.ok(nativeListener);
+  run.child.kill('SIGTERM');
+  await run.finished;
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.throws(() => process.kill(nativeListener.pid, 0), { code: 'ESRCH' });
 });

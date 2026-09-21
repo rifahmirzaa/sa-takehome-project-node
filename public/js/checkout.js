@@ -14,10 +14,14 @@
   const retryInitButton = document.getElementById('retry-init-button');
   const submitButton = document.getElementById('submit-button');
   const spinner = document.getElementById('spinner');
+  const emailInput = document.getElementById('checkout-email');
+  const totalEl = document.getElementById('checkout-total');
+  const buttonText = document.getElementById('button-text');
   const paymentMessage = document.getElementById('payment-message');
 
   let stripe = null;
-  let elements = null;
+  let checkout = null;
+  let actions = null;
   let isSubmitting = false;
   let isInitializing = false;
   let isReady = false;
@@ -85,48 +89,62 @@
     isSubmitting = false;
   }
 
-  async function resolvePaymentIntent() {
-    const attempt = getStoredAttempt() || { attemptId: generateUUID(), createdAt: Date.now() };
+  async function resolveCheckoutSession() {
+    const attempt = getStoredAttempt() || { version: 2, attemptId: generateUUID(), createdAt: Date.now() };
+    if (attempt.version !== 2) {
+      throw new Error('This tab has a checkout from the previous payment integration. Check that payment in Stripe before clearing the saved checkout.');
+    }
 
-    if (attempt.clientSecret) {
-      const checkRes = await fetch('/payment-status', {
+    if (attempt.sessionId) {
+      const checkRes = await fetch('/checkout-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientSecret: attempt.clientSecret })
+        body: JSON.stringify({ sessionId: attempt.sessionId })
       });
       if (!checkRes.ok) {
         throw new Error('Unable to verify your previous payment. Please try checking again before making another payment.');
       }
       const data = await checkRes.json();
-      if (!['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(data.status)) {
-        window.location.href = '/success?payment_intent_client_secret=' + encodeURIComponent(attempt.clientSecret);
+      if (data.status !== 'open' || data.paymentStatus !== 'unpaid') {
+        window.location.href = '/success?session_id=' + encodeURIComponent(attempt.sessionId);
         return null;
       }
+      if (!attempt.clientSecret) throw new Error('Checkout details are missing. Check the previous payment before starting another checkout.');
       return attempt.clientSecret;
     }
 
-    // Stripe can forget idempotency keys after 24 hours, so do not retry an unresolved old request
+    // Preserve the original attempt when a creation response is lost
     if (Date.now() - attempt.createdAt >= EXPIRATION_WINDOW_MS) {
       throw new Error('This checkout is too old to retry safely. Please contact support to check the previous payment before starting another checkout.');
     }
-
-    // Save before requesting an intent so a lost response can be retried with the same key
     saveAttempt(attempt);
-
-    const res = await fetch('/create-payment-intent', {
+    const res = await fetch('/create-checkout-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ itemId: bookId, attemptId: attempt.attemptId })
     });
-
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || 'Unable to initialize checkout');
     }
-
-    const { clientSecret } = await res.json();
-    saveAttempt({ ...attempt, clientSecret: clientSecret });
+    const { sessionId, clientSecret } = await res.json();
+    if (typeof sessionId !== 'string' || !/^cs_(?:test_|live_)?[a-zA-Z0-9]+$/.test(sessionId)) {
+      throw new Error('Unable to read the checkout response. Please retry.');
+    }
+    saveAttempt({ ...attempt, sessionId, clientSecret });
+    if (!clientSecret) {
+      window.location.href = '/success?session_id=' + encodeURIComponent(sessionId);
+      return null;
+    }
     return clientSecret;
+  }
+
+  function updateTotal(session) {
+    const amount = session.total.total.amount;
+    const currency = session.currency.toUpperCase();
+    totalEl.textContent = amount + ' ' + currency;
+    buttonText.textContent = 'Pay ' + amount + ' ' + currency;
+    if (session.email && !emailInput.value) emailInput.value = session.email;
   }
 
   async function init() {
@@ -142,17 +160,26 @@
     try {
       if (paymentElement) paymentElement.destroy();
       paymentElement = null;
-      elements = null;
+      actions = null;
+      checkout = null;
       if (typeof Stripe !== 'function') {
         throw new Error('Unable to load Stripe. Please check your connection and reload this page.');
       }
-      const clientSecret = await resolvePaymentIntent();
+      const clientSecret = await resolveCheckoutSession();
       if (!clientSecret) return;
 
       stripe = Stripe(publishableKey);
-      elements = stripe.elements({ clientSecret: clientSecret });
+      const currentCheckout = stripe.initCheckoutElementsSdk({ clientSecret: clientSecret });
+      checkout = currentCheckout;
+      const result = await currentCheckout.loadActions();
+      if (result.type !== 'success') throw new Error(result.error?.message || 'Unable to load checkout. Please try again.');
+      actions = result.actions;
+      updateTotal(actions.getSession());
+      currentCheckout.on('change', function(session) {
+        if (checkout === currentCheckout) updateTotal(session);
+      });
 
-      const mountedElement = elements.create('payment');
+      const mountedElement = currentCheckout.createPaymentElement();
       paymentElement = mountedElement;
 
       mountedElement.on('ready', function() {
@@ -175,6 +202,8 @@
           paymentMessage.textContent = '';
         }
       });
+      // Mount into a visible container so Stripe can measure the form width
+      if (form) form.classList.remove('d-none');
       mountedElement.mount('#payment-element');
     } catch (err) {
       showInitError(err.message || 'Unable to load payment form. Please try again.');
@@ -189,7 +218,7 @@
   if (form) {
     form.addEventListener('submit', async function(event) {
       event.preventDefault();
-      if (isSubmitting || !isReady || !stripe || !elements) return;
+      if (isSubmitting || !isReady || !actions) return;
 
       isSubmitting = true;
       submitButton.disabled = true;
@@ -200,17 +229,9 @@
       }
 
       try {
-        const returnUrl = window.location.origin + '/success';
-        const { error } = await stripe.confirmPayment({
-          elements: elements,
-          confirmParams: {
-            return_url: returnUrl
-          }
-        });
-
-        // Customer-facing validation or card decline errors return here
-        if (error) {
-          showSubmissionError(error.message || 'An error occurred during payment.');
+        const result = await actions.confirm({ email: emailInput.value });
+        if (result.type === 'error') {
+          showSubmissionError(result.error.message || 'Unable to complete payment. Please try again.');
         }
       } catch (networkErr) {
         showSubmissionError('Network connection error. Please check your connection and try again.');

@@ -62,7 +62,7 @@ cleanup() {
   trap - EXIT
   for pid in "$server_pid" "$listener_pid"; do
     if [[ -n "$pid" ]]; then
-      kill "$pid" 2>/dev/null || true
+      kill -- "-$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
     fi
   done
@@ -97,9 +97,11 @@ server.on('error', () => {
 server.listen(Number(process.env.PORT), () => server.close());
 NODE
 
+# Give background jobs separate groups so cleanup also stops CLI wrapper children
+set -m
 printf '%s\n' 'Starting Stripe webhook forwarding...'
 stripe listen --color off --skip-update \
-  --events payment_intent.succeeded,payment_intent.processing,payment_intent.payment_failed \
+  --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired \
   --forward-to "http://localhost:$PORT/webhook" >"$run_dir/listener.log" 2>&1 &
 listener_pid=$!
 

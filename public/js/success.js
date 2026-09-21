@@ -58,10 +58,10 @@
 
   async function checkPaymentStatus() {
     const params = new URLSearchParams(window.location.search);
-    const clientSecret = params.get('payment_intent_client_secret');
+    const sessionId = params.get('session_id');
 
-    // Reject missing or malformed client secrets without calling server
-    if (!clientSecret || !/^pi_[a-zA-Z0-9]+_secret_[a-zA-Z0-9]+$/.test(clientSecret)) {
+    // Reject missing or malformed session references before requesting status
+    if (!sessionId || !/^cs_(?:test_|live_)?[a-zA-Z0-9]{1,200}$/.test(sessionId)) {
       renderState({
         iconHtml: '<i class="fas fa-exclamation-circle text-warning fa-3x"></i>',
         title: 'No payment reference found',
@@ -74,10 +74,10 @@
     }
 
     try {
-      const res = await fetch('/payment-status', {
+      const res = await fetch('/checkout-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientSecret: clientSecret })
+        body: JSON.stringify({ sessionId: sessionId })
       });
 
       if (res.status === 404) {
@@ -107,15 +107,20 @@
 
       const data = await res.json();
       const status = data.status;
+      const paid = status === 'complete' && data.paymentStatus === 'paid' &&
+        data.paymentIntentStatus === 'succeeded' && /^pi_[a-zA-Z0-9]+$/.test(data.id || '') &&
+        Number.isInteger(data.amountReceived) && data.amountReceived > 0;
+      const failed = status === 'complete' && data.paymentStatus === 'unpaid' &&
+        ['requires_payment_method', 'canceled'].includes(data.paymentIntentStatus);
 
-      if (status === 'succeeded' || status === 'canceled') {
+      if (paid || status === 'expired' || failed) {
         // Clear only the matching attempt after Stripe reports a final outcome
         if (data.bookId && data.attemptId) {
           try {
             const storedRaw = sessionStorage.getItem('checkout_attempt_' + data.bookId);
             if (storedRaw) {
               const stored = JSON.parse(storedRaw);
-              if (stored && stored.attemptId === data.attemptId) {
+              if (stored && stored.sessionId === sessionId && stored.attemptId === data.attemptId) {
                 sessionStorage.removeItem('checkout_attempt_' + data.bookId);
               }
             }
@@ -123,7 +128,7 @@
         }
       }
 
-      if (status === 'succeeded') {
+      if (paid) {
         renderState({
           iconHtml: '<i class="far fa-check-circle text-success fa-3x"></i>',
           title: 'Payment successful',
@@ -137,43 +142,34 @@
             { tag: 'a', href: '/', className: 'btn btn-primary', text: 'Continue shopping' }
           ]
         });
-      } else if (status === 'processing') {
+      } else if (status === 'expired') {
+        renderState({
+          iconHtml: '<i class="fas fa-clock text-secondary fa-3x"></i>',
+          title: 'Checkout expired',
+          message: 'This checkout has expired. Select your book again to start a new checkout.',
+          actions: [{ tag: 'a', href: '/', className: 'btn btn-primary', text: 'Browse books' }]
+        });
+      } else if (failed) {
+        renderState({
+          iconHtml: '<i class="fas fa-times-circle text-danger fa-3x"></i>',
+          title: 'Payment failed',
+          message: 'The payment did not complete. You can start a new checkout.',
+          actions: [{ tag: 'a', href: '/', className: 'btn btn-primary', text: 'Browse books' }]
+        });
+      } else if (status === 'complete') {
         renderState({
           iconHtml: '<div class="spinner-border text-info my-2" role="status"><span class="sr-only">Processing…</span></div>',
           title: 'Payment processing',
-          message: 'Your payment is being processed. It may take a moment for your bank to complete the charge.',
-          actions: [
-            { tag: 'button', onClick: checkPaymentStatus, className: 'btn btn-outline-primary mr-2', text: 'Check again' },
-            { tag: 'a', href: '/', className: 'btn btn-outline-secondary', text: 'Return to catalog' }
-          ]
+          message: 'Your payment has not been confirmed yet. Check again for the latest status.',
+          actions: [{ tag: 'button', onClick: checkPaymentStatus, className: 'btn btn-primary', text: 'Check again' }]
         });
-      } else if (status === 'requires_payment_method') {
-        renderState({
-          iconHtml: '<i class="fas fa-times-circle text-danger fa-3x"></i>',
-          title: 'Payment was not completed',
-          message: 'Your payment could not be completed with the details provided.',
-          actions: [
-            { tag: 'a', href: data.bookId ? '/checkout?item=' + encodeURIComponent(data.bookId) : '/', className: 'btn btn-primary mr-2', text: 'Try again' },
-            { tag: 'a', href: '/', className: 'btn btn-outline-secondary', text: 'Return to catalog' }
-          ]
-        });
-      } else if (status === 'requires_action' || status === 'requires_confirmation') {
+      } else if (status === 'open') {
         renderState({
           iconHtml: '<i class="fas fa-exclamation-circle text-warning fa-3x"></i>',
           title: 'Payment incomplete',
-          message: 'Additional authentication or confirmation was required to complete this payment.',
-          actions: [
-            { tag: 'a', href: data.bookId ? '/checkout?item=' + encodeURIComponent(data.bookId) : '/', className: 'btn btn-primary mr-2', text: 'Return to checkout' }
-          ]
-        });
-      } else if (status === 'canceled') {
-        renderState({
-          iconHtml: '<i class="fas fa-ban text-secondary fa-3x"></i>',
-          title: 'Payment canceled',
-          message: 'This payment has been canceled.',
-          actions: [
-            { tag: 'a', href: '/', className: 'btn btn-outline-secondary', text: 'Return to catalog' }
-          ]
+          message: 'Return to checkout to finish your payment.',
+          actions: [{ tag: 'a', href: data.bookId ? '/checkout?item=' + encodeURIComponent(data.bookId) : '/',
+            className: 'btn btn-primary', text: 'Return to checkout' }]
         });
       } else {
         renderState({
