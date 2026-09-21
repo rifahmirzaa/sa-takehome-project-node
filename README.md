@@ -1,4 +1,4 @@
-# Book Nook
+# Stripe Press
 
 A bookshop with embedded Stripe payments: **choose a book → pay → receive a verified confirmation** with the charged amount, currency, and PaymentIntent ID (`pi_…`).
 

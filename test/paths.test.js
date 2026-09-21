@@ -33,7 +33,7 @@ test('a relocated app loads its own configuration, templates, and assets from an
           const origin = 'http://127.0.0.1:' + server.address().port;
           const home = await fetch(origin + '/');
           assert.equal(home.status, 200);
-          assert.match(await home.text(), /Book Nook/);
+          assert.match(await home.text(), /Stripe Press/);
           const checkout = await fetch(origin + '/checkout?item=1');
           assert.equal(checkout.status, 200);
           assert.match(await checkout.text(), /pk_test_path_fixture/);
